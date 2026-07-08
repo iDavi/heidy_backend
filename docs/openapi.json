@@ -3,7 +3,7 @@
   "info": {
     "title": "heidy_api",
     "version": "1.0.0",
-    "description": "Student academic organizer API (v1 targets USP). Thin Phoenix controllers over rich domain contexts. All times are ISO 8601 UTC; ids are UUID v4. Errors use a single envelope. See docs/architecture.md and docs/api.md."
+    "description": "Student academic organizer API (v1 targets USP). The heidy account IS the USP account: login verifies against USP live and creates the account on first success. No credentials are stored server-side, ever: the client holds an opaque credential blob decryptable only with three separately-held server-side keys (per-blob CEK, per-user vault key, KMS-held HPKE key), used in worker memory per sync and discarded. All times are ISO 8601 UTC; ids are UUID v4. See docs/architecture.md and docs/api.md."
   },
   "servers": [
     { "url": "https://api.heidy.app/api/v1", "description": "production" },
@@ -12,7 +12,7 @@
   "security": [{ "bearerAuth": [] }],
   "tags": [
     { "name": "Health" }, { "name": "Auth" }, { "name": "User" },
-    { "name": "Vault" }, { "name": "UspSync" }, { "name": "Semesters" },
+    { "name": "UspSync" }, { "name": "Semesters" },
     { "name": "Enrollments" }, { "name": "Meetings" }, { "name": "Tasks" },
     { "name": "Grades" }, { "name": "Absences" }, { "name": "Catalog" }
   ],
@@ -31,59 +31,34 @@
         }
       }
     },
-    "/auth/register": {
-      "post": {
-        "tags": ["Auth"], "summary": "Create an account", "security": [],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegisterInput" } } } },
+    "/auth/login-key": {
+      "get": {
+        "tags": ["Auth"], "summary": "Current HPKE public key for sealing the login envelope", "security": [],
+        "description": "Cacheable. Keys rotate via key_id; envelopes sealed to an expired key_id are rejected with 422.",
         "responses": {
-          "201": { "description": "created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuthResultResponse" } } } },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "422": { "$ref": "#/components/responses/ValidationFailed" }
+          "200": { "description": "ok", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginKeyResponse" } } } }
         }
       }
     },
     "/auth/login": {
       "post": {
-        "tags": ["Auth"], "summary": "Exchange credentials for a token", "security": [],
+        "tags": ["Auth"], "summary": "Verify USP credentials live and start a session", "security": [],
+        "description": "Creates the heidy account on first successful USP verification. Returns a bearer token and a credential_blob the client must keep in device secure storage; the blob is required for sync and is only re-issued by logging in again. Strictly rate-limited.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginInput" } } } },
         "responses": {
           "200": { "description": "ok", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuthResultResponse" } } } },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "429": { "$ref": "#/components/responses/RateLimited" }
+          "401": { "description": "USP rejected the credentials", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "422": { "$ref": "#/components/responses/ValidationFailed" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "$ref": "#/components/responses/UspUnreachable" }
         }
       }
     },
     "/auth/logout": {
       "delete": {
         "tags": ["Auth"], "summary": "Revoke the current token",
+        "description": "Does not affect credential blobs on devices; revoke those with DELETE /me/credential.",
         "responses": { "204": { "$ref": "#/components/responses/NoContent" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
-      }
-    },
-    "/auth/password/forgot": {
-      "post": {
-        "tags": ["Auth"], "summary": "Request a password-reset token", "security": [],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": {
-          "type": "object", "required": ["email"],
-          "properties": { "email": { "type": "string", "format": "email", "maxLength": 160 } }
-        }}}},
-        "responses": { "202": { "description": "accepted (does not reveal whether the email exists)" } }
-      }
-    },
-    "/auth/password/reset": {
-      "post": {
-        "tags": ["Auth"], "summary": "Reset password with a token", "security": [],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": {
-          "type": "object", "required": ["token", "password"],
-          "properties": {
-            "token": { "type": "string", "minLength": 1 },
-            "password": { "$ref": "#/components/schemas/Password" }
-          }
-        }}}},
-        "responses": {
-          "200": { "description": "reset" },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "422": { "$ref": "#/components/responses/ValidationFailed" }
-        }
       }
     },
     "/me": {
@@ -101,65 +76,15 @@
       },
       "delete": {
         "tags": ["User"], "summary": "Delete the account and all owned data",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": {
-          "type": "object", "required": ["password"], "properties": { "password": { "type": "string", "minLength": 1 } }
-        }}}},
-        "responses": { "204": { "$ref": "#/components/responses/NoContent" }, "403": { "$ref": "#/components/responses/Forbidden" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+        "description": "Deletes semesters, enrollments, tasks, and the per-user credential key. Rate-limited.",
+        "responses": { "204": { "$ref": "#/components/responses/NoContent" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "429": { "$ref": "#/components/responses/RateLimited" } }
       }
     },
-    "/me/password": {
-      "put": {
-        "tags": ["User"], "summary": "Change password",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": {
-          "type": "object", "required": ["current_password", "new_password"],
-          "properties": {
-            "current_password": { "type": "string", "minLength": 1 },
-            "new_password": { "$ref": "#/components/schemas/Password" }
-          }
-        }}}},
-        "responses": { "200": { "description": "changed" }, "403": { "$ref": "#/components/responses/Forbidden" }, "422": { "$ref": "#/components/responses/ValidationFailed" } }
-      }
-    },
-    "/me/usp-credential": {
-      "get": {
-        "tags": ["Vault"], "summary": "USP credential metadata (never the secret)",
-        "responses": { "200": { "description": "ok", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UspCredentialMetaResponse" } } } }, "401": { "$ref": "#/components/responses/Unauthorized" } }
-      },
-      "post": {
-        "tags": ["Vault"], "summary": "Store or replace the USP credential (PIN-encrypted)",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UspCredentialInput" } } } },
-        "responses": {
-          "201": { "description": "stored", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UspCredentialMetaResponse" } } } },
-          "403": { "$ref": "#/components/responses/Forbidden" },
-          "422": { "$ref": "#/components/responses/ValidationFailed" },
-          "502": { "description": "USP unreachable during verification", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
-        }
-      },
+    "/me/credential": {
       "delete": {
-        "tags": ["Vault"], "summary": "Remove the stored credential",
+        "tags": ["User"], "summary": "Revoke all credential blobs (remote kill switch)",
+        "description": "Rotates the per-user vault key (K_user), instantly invalidating every credential blob issued to any of the user's devices. Use after a lost/stolen device. Subsequent syncs return 403 until the user logs in again.",
         "responses": { "204": { "$ref": "#/components/responses/NoContent" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
-      }
-    },
-    "/me/usp-credential/pin": {
-      "put": {
-        "tags": ["Vault"], "summary": "Rotate the PIN (re-wraps the data key)",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": {
-          "type": "object", "required": ["pin", "new_pin"],
-          "properties": { "pin": { "$ref": "#/components/schemas/Pin" }, "new_pin": { "$ref": "#/components/schemas/Pin" } }
-        }}}},
-        "responses": { "200": { "description": "rotated" }, "403": { "$ref": "#/components/responses/Forbidden" }, "422": { "$ref": "#/components/responses/ValidationFailed" } }
-      }
-    },
-    "/me/usp-credential/verify": {
-      "post": {
-        "tags": ["Vault"], "summary": "Verify the credential against USP live",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": {
-          "type": "object", "required": ["pin"], "properties": { "pin": { "$ref": "#/components/schemas/Pin" } }
-        }}}},
-        "responses": {
-          "200": { "description": "ok", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UspCredentialMetaResponse" } } } },
-          "403": { "$ref": "#/components/responses/Forbidden" }
-        }
       }
     },
     "/usp/sync": {
@@ -173,12 +98,14 @@
       },
       "post": {
         "tags": ["UspSync"], "summary": "Kick off an import (async)",
+        "description": "The worker decrypts the blob in memory (KMS decap -> K_user unwrap -> CEK), performs exactly one fresh USP login (sessions are never cached across runs), scrapes, upserts by external_ref, and zeroes the plaintext. Syncs are serialized per user.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SyncInput" } } } },
         "responses": {
           "202": { "description": "accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SyncRunResponse" } } } },
-          "403": { "$ref": "#/components/responses/Forbidden" },
-          "409": { "description": "a sync is already running", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-          "422": { "$ref": "#/components/responses/ValidationFailed" }
+          "403": { "description": "credential blob expired, revoked, or not issued to this user; re-login required", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "a sync is already running for this user", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "422": { "$ref": "#/components/responses/ValidationFailed" },
+          "502": { "$ref": "#/components/responses/UspUnreachable" }
         }
       }
     },
@@ -242,6 +169,7 @@
       "get": { "tags": ["Enrollments"], "summary": "Class detail (with meetings)", "responses": { "200": { "description": "ok", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EnrollmentResponse" } } } }, "404": { "$ref": "#/components/responses/NotFound" } } },
       "patch": {
         "tags": ["Enrollments"], "summary": "Update a class",
+        "description": "Editing a USP-imported enrollment sets a user_edited flag so future syncs do not overwrite the changes.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EnrollmentUpdateInput" } } } },
         "responses": { "200": { "description": "ok", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EnrollmentResponse" } } } }, "404": { "$ref": "#/components/responses/NotFound" }, "422": { "$ref": "#/components/responses/ValidationFailed" } }
       },
@@ -407,7 +335,7 @@
   },
   "components": {
     "securitySchemes": {
-      "bearerAuth": { "type": "http", "scheme": "bearer", "description": "Token from /auth/register or /auth/login." }
+      "bearerAuth": { "type": "http", "scheme": "bearer", "description": "Token from /auth/login." }
     },
     "parameters": {
       "Id": { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
@@ -417,11 +345,11 @@
     "responses": {
       "NoContent": { "description": "no content" },
       "Unauthorized": { "description": "missing/invalid token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "Forbidden": { "description": "authenticated but forbidden (e.g. wrong PIN)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "NotFound": { "description": "not found or not owned", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "Conflict": { "description": "conflict (duplicate / overlap)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "ValidationFailed": { "description": "validation failed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ValidationError" } } } },
-      "RateLimited": { "description": "too many requests", "headers": { "Retry-After": { "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+      "RateLimited": { "description": "too many requests", "headers": { "Retry-After": { "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "UspUnreachable": { "description": "USP unreachable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
     },
     "schemas": {
       "Error": {
@@ -433,7 +361,7 @@
         "properties": { "errors": { "type": "object", "required": ["detail", "fields"], "properties": {
           "detail": { "type": "string" },
           "fields": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } },
-            "examples": [{ "email": ["can't be blank"], "score": ["must be less than or equal to max_score"] }] }
+            "examples": [{ "title": ["can't be blank"], "score": ["must be less than or equal to max_score"] }] }
         }}}
       },
       "PaginationMeta": {
@@ -444,45 +372,74 @@
           "total": { "type": "integer", "minimum": 0 }
         }
       },
-      "Password": { "type": "string", "minLength": 8, "maxLength": 72, "pattern": "^(?=.*[A-Za-z])(?=.*\\d).+$", "description": "8-72 chars, at least one letter and one digit." },
-      "Pin": { "type": "string", "pattern": "^\\d{4,12}$", "description": "4-12 digits. Never stored; encrypts the USP credential.", "writeOnly": true },
       "Source": { "type": "string", "enum": ["manual", "usp"], "readOnly": true },
       "TaskKind": { "type": "string", "enum": ["assignment", "exam", "reading", "project", "other"] },
       "TaskStatus": { "type": "string", "enum": ["todo", "doing", "done"] },
       "TaskPriority": { "type": "string", "enum": ["low", "normal", "high"] },
       "SyncSource": { "type": "string", "enum": ["schedule", "grades", "absences", "disciplines"] },
       "SyncStatus": { "type": "string", "enum": ["pending", "running", "succeeded", "failed"] },
-      "CredentialStatus": { "type": "string", "enum": ["unverified", "verified", "invalid"] },
 
-      "RegisterInput": {
-        "type": "object", "additionalProperties": false, "required": ["email", "password", "name"],
+      "LoginKeyResponse": {
+        "type": "object", "required": ["data"],
+        "properties": { "data": { "type": "object", "required": ["key_id", "alg", "public_key"], "properties": {
+          "key_id": { "type": "string", "maxLength": 32 },
+          "alg": { "type": "string", "examples": ["HPKE-X25519-HKDF-SHA256+CHACHA20POLY1305"] },
+          "public_key": { "type": "string", "contentEncoding": "base64", "maxLength": 128 }
+        }}}
+      },
+      "CredentialEnvelope": {
+        "type": "object", "additionalProperties": false, "required": ["key_id", "enc", "ciphertext", "encrypted_at"],
+        "description": "HPKE single-shot seal of the USP password to the server's login key, produced client-side. AAD binds usp_username and encrypted_at.",
         "properties": {
-          "email": { "type": "string", "format": "email", "maxLength": 160 },
-          "password": { "$ref": "#/components/schemas/Password" },
-          "name": { "type": "string", "minLength": 1, "maxLength": 80 }
+          "key_id": { "type": "string", "maxLength": 32, "description": "A currently valid key id from GET /auth/login-key." },
+          "enc": { "type": "string", "contentEncoding": "base64", "maxLength": 128, "description": "KEM encapsulated key." },
+          "ciphertext": { "type": "string", "contentEncoding": "base64", "maxLength": 512, "writeOnly": true },
+          "encrypted_at": { "type": "string", "format": "date-time", "description": "Server rejects envelopes older than 5 minutes (replay bound)." }
         }
       },
+      "CredentialBlob": {
+        "type": "object", "required": ["blob", "key_version", "issued_at", "expires_at"],
+        "description": "Opaque three-key-wrapped ciphertext of the USP credential. The client stores it in device secure storage and cannot decrypt it; the server persists nothing. Presented in the body of sync requests.",
+        "properties": {
+          "blob": { "$ref": "#/components/schemas/CredentialBlobString" },
+          "key_version": { "type": "integer", "minimum": 1, "description": "K_user version this blob was wrapped under; rotation via DELETE /me/credential invalidates it." },
+          "issued_at": { "type": "string", "format": "date-time" },
+          "expires_at": { "type": "string", "format": "date-time", "description": "Server-enforced max age; re-login re-issues." }
+        }
+      },
+      "CredentialBlobString": {
+        "type": "string", "minLength": 1, "maxLength": 4096, "contentEncoding": "base64url",
+        "description": "version | key ids | KEM enc | wrapped CEK | password ciphertext | nonces | issued_at, base64url-encoded. Opaque to clients."
+      },
+
       "LoginInput": {
-        "type": "object", "additionalProperties": false, "required": ["email", "password"],
-        "properties": { "email": { "type": "string", "format": "email" }, "password": { "type": "string", "minLength": 1 } }
+        "type": "object", "additionalProperties": false, "required": ["usp_username", "envelope"],
+        "properties": {
+          "usp_username": { "type": "string", "pattern": "^\\d{6,12}$", "description": "USP number." },
+          "envelope": { "$ref": "#/components/schemas/CredentialEnvelope" }
+        }
       },
       "AuthResultResponse": {
         "type": "object", "required": ["data"],
-        "properties": { "data": { "type": "object", "required": ["user", "token", "token_expires_at"], "properties": {
+        "properties": { "data": { "type": "object", "required": ["user", "token", "token_expires_at", "credential_blob"], "properties": {
           "user": { "$ref": "#/components/schemas/User" },
           "token": { "type": "string" },
-          "token_expires_at": { "type": "string", "format": "date-time" }
+          "token_expires_at": { "type": "string", "format": "date-time" },
+          "credential_blob": { "$ref": "#/components/schemas/CredentialBlob" }
         }}}
       },
       "User": {
-        "type": "object", "required": ["id", "email", "name"],
+        "type": "object", "required": ["id", "usp_username", "name"],
         "properties": {
           "id": { "type": "string", "format": "uuid" },
-          "email": { "type": "string", "format": "email" },
+          "usp_username": { "type": "string" },
           "name": { "type": "string" },
-          "university": { "oneOf": [{ "$ref": "#/components/schemas/University" }, { "type": "null" }] },
+          "email": { "oneOf": [{ "type": "string", "format": "email" }, { "type": "null" }] },
           "course": { "oneOf": [{ "$ref": "#/components/schemas/Course" }, { "type": "null" }] },
-          "usp_credential": { "$ref": "#/components/schemas/UspCredentialMeta" },
+          "credential": { "type": "object", "required": ["key_version"], "properties": {
+            "key_version": { "type": "integer", "minimum": 1 },
+            "last_login_at": { "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] }
+          }},
           "inserted_at": { "type": "string", "format": "date-time" }
         }
       },
@@ -491,35 +448,15 @@
         "type": "object", "additionalProperties": false, "minProperties": 1,
         "properties": {
           "name": { "type": "string", "minLength": 1, "maxLength": 80 },
-          "university_id": { "type": "string", "format": "uuid" },
+          "email": { "oneOf": [{ "type": "string", "format": "email", "maxLength": 160 }, { "type": "null" }] },
           "course_id": { "type": "string", "format": "uuid" }
         }
       },
 
-      "UspCredentialInput": {
-        "type": "object", "additionalProperties": false, "required": ["usp_username", "usp_password", "pin"],
-        "properties": {
-          "usp_username": { "type": "string", "pattern": "^\\d{6,12}$", "description": "USP number." },
-          "usp_password": { "type": "string", "minLength": 1, "maxLength": 128, "writeOnly": true, "description": "USP Senha Unica; encrypted at rest, never returned." },
-          "pin": { "$ref": "#/components/schemas/Pin" },
-          "verify": { "type": "boolean", "default": true }
-        }
-      },
-      "UspCredentialMeta": {
-        "type": "object", "required": ["connected"],
-        "properties": {
-          "connected": { "type": "boolean" },
-          "status": { "$ref": "#/components/schemas/CredentialStatus" },
-          "usp_username": { "type": "string" },
-          "last_verified_at": { "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] }
-        }
-      },
-      "UspCredentialMetaResponse": { "type": "object", "required": ["data"], "properties": { "data": { "$ref": "#/components/schemas/UspCredentialMeta" } } },
-
       "SyncInput": {
-        "type": "object", "additionalProperties": false, "required": ["pin"],
+        "type": "object", "additionalProperties": false, "required": ["credential_blob"],
         "properties": {
-          "pin": { "$ref": "#/components/schemas/Pin" },
+          "credential_blob": { "$ref": "#/components/schemas/CredentialBlobString" },
           "sources": { "type": "array", "items": { "$ref": "#/components/schemas/SyncSource" }, "uniqueItems": true, "minItems": 1 },
           "semester_id": { "type": "string", "format": "uuid" }
         }

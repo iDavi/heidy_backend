@@ -7,21 +7,19 @@ context module.
 
 ```
 HTTP ─▶ Router ─▶ Plug pipeline ─▶ Controller ─▶ Context ─▶ Ecto ─▶ Postgres
-                   (auth, pin)       (thin)       (logic)      │
+                   (auth)            (thin)       (logic)      │
                                                  UspSync ──▶ USP (Júpiter, e-Disciplinas)
                                                    (anti-corruption layer, Oban jobs)
 ```
 
-v1 targets **USP** (Universidade de São Paulo): a student connects their USP
-account, heidy imports their schedule, disciplines, grades and absences, and
-the student also plans tasks on top. The schemas are written university-agnostic
-(so a second university is additive, not a rewrite) but only USP is seeded and
-integrated in v1.
+v1 targets **USP** (Universidade de São Paulo). The heidy account **is** the
+USP account: a student logs in with their USP number + Senha Única, heidy
+verifies it against USP, and imports their schedule, disciplines, grades and
+absences — on top of which the student plans tasks. Schemas are written
+university-agnostic (a second university is additive, not a rewrite) but only
+USP is integrated in v1.
 
 ## What "better architected" means here
-
-heidy is designed from clean domain boundaries rather than around a scraper.
-Concretely:
 
 - **The USP scrape never touches the domain schemas directly.** It goes through
   an anti-corruption layer that maps USP's messy HTML/DTO shapes into our own
@@ -30,9 +28,11 @@ Concretely:
   (`:manual` | `:usp`) and an `external_ref`. Re-syncs *upsert* by
   `external_ref` instead of duplicating, and a user's manual edits are never
   silently clobbered by a later sync.
-- **Secrets are modeled explicitly.** The heidy login secret and the USP login
-  secret are *different kinds of secret* with different cryptography, in
-  different contexts (`Accounts` vs `Vault`). See below.
+- **No credentials at rest.** heidy never stores the USP password — not even
+  encrypted. The client device stores an opaque ciphertext it cannot read; the
+  server can only decrypt it with the participation of three separately-held
+  keys, uses the plaintext in memory, and discards it. See "The credential
+  envelope" below.
 - **Integration is asynchronous.** A sync returns immediately with a `SyncRun`
   id; the actual login+scrape runs in a supervised worker, so a slow USP never
   blocks a request.
@@ -41,40 +41,38 @@ Concretely:
 
 ### `Accounts`
 
-heidy identity. Login to *heidy itself*.
+heidy identity. There is **no heidy password** — identity is the USP account.
 
-| Schema      | Purpose                                                        |
-| ----------- | ------------------------------------------------------------- |
-| `User`      | email, **one-way** password hash (Argon2id), name, `confirmed_at` |
-| `UserToken` | hashed session / API tokens (`phx.gen.auth` model)            |
+| Schema      | Purpose                                                          |
+| ----------- | ---------------------------------------------------------------- |
+| `User`      | `usp_username` (unique), name, optional email, optional `course_id`; created automatically on first successful USP login |
+| `UserToken` | hashed session/API tokens (the `phx.gen.auth` token model)       |
 
-The heidy password is a normal, irreversible hash — we never need it back.
+Consequently there is no register/password-reset surface: `POST /auth/login`
+creates the account on first successful verification against USP.
 
-### `Vault`
+### `Credentials`
 
-The USP credential. This is the crux of v1 and the reason a naïve design fails:
-to import from USP, heidy must **replay** the student's USP password against
-USP's login — so it cannot be a one-way hash. It must be **reversibly
-encrypted**, and it must be encrypted such that a database leak alone does not
-expose it.
+Owns the cryptography: issuing, unwrapping, and revoking **credential blobs**.
+Stores *keys about* the credential — never the credential.
 
-| Schema          | Purpose                                                       |
-| --------------- | ------------------------------------------------------------- |
-| `UspCredential` | USP username + **encrypted** USP password, plus KDF/crypto metadata (salt, nonces, wrapped key, KDF params, key-check value), `last_verified_at`, `status` |
+| Schema          | Purpose                                                              |
+| --------------- | -------------------------------------------------------------------- |
+| `CredentialKey` | per-user vault key `K_user` (256-bit, itself encrypted at rest under an app-level KMS data key) + `version`; rotating it revokes every blob ever issued to that user |
 
-The plaintext USP password, the user's PIN, and any derived key are **never**
-persisted and **never** logged. See the next section for the scheme.
+The USP password, any plaintext key material, and decrypted blobs are **never**
+persisted and **never** logged.
 
 ### `Catalog`
 
 USP reference data (seeded/synced, read-only through the API). Written
 generically so other universities fit later.
 
-| Schema       | Purpose                                                 |
-| ------------ | ------------------------------------------------------- |
-| `University` | e.g. USP                                                |
-| `Unit`       | teaching unit / institute (e.g. ICMC, POLI); `belongs_to :university` |
-| `Course`     | degree program; `belongs_to :unit`                      |
+| Schema       | Purpose                                                     |
+| ------------ | ----------------------------------------------------------- |
+| `University` | e.g. USP                                                    |
+| `Unit`       | teaching unit / institute (e.g. ICMC, POLI)                 |
+| `Course`     | degree program; `belongs_to :unit`                          |
 | `Discipline` | canonical discipline (USP code, name, credits); `belongs_to :unit` |
 
 ### `Planner`
@@ -84,7 +82,7 @@ only through that user's token. Rows may be **manual** or **imported from USP**;
 both share the same schemas, distinguished by `source`/`external_ref`.
 
 | Schema       | Purpose                                                                     |
-| ------------ | --------------------------------------------------------------------------- |
+| ------------ | ---------------------------------------------------------------------------- |
 | `Semester`   | `belongs_to :user`; label (e.g. "2026.1"), dates, `active`                   |
 | `Enrollment` | a class the student takes; `belongs_to :user, :semester`; optional `discipline_id`; title, professor, credits, `absence_limit`, `source`, `external_ref` |
 | `Meeting`    | recurring weekly slot; `belongs_to :enrollment`; `day_of_week`, `starts_at`, `ends_at`, `location` |
@@ -107,58 +105,103 @@ The integration boundary. Everything that knows USP exists lives here.
 | `SyncRun`        | one sync attempt: `status` (pending/running/succeeded/failed), `sources`, counts, error, timing |
 | Oban worker      | runs login + scrape + upsert off the request path                       |
 
-## The USP credential vault (PIN-based envelope encryption)
+## The credential envelope (three keys, nothing at rest)
 
-Two secrets, two treatments:
+heidy must **replay** the student's Senha Única against USP to import data, so
+the credential must be recoverable — but a central database of reversible
+student passwords is a honeypot and a liability. The design goal is therefore:
 
-| Secret                | Purpose                     | Storage                              |
-| --------------------- | --------------------------- | ------------------------------------ |
-| heidy password        | log in to heidy             | **one-way** hash (Argon2id) — irreversible |
-| USP Senha Única       | replay against USP to import| **reversible**, encrypted under a PIN-derived key |
+> **The server persists no credential, ever. The client persists only
+> ciphertext it cannot read. Decryption requires three separately-held keys
+> and happens only in worker memory, per use.**
 
-### Scheme
+### The three keys
 
-The USP password is protected with **envelope encryption**, unlocked by a
-user-chosen **PIN** that the server never stores.
+| Key       | What                                   | Where it lives                          |
+| --------- | -------------------------------------- | ---------------------------------------- |
+| `K_kms`   | X25519 HPKE keypair                    | KMS/HSM; private key **non-exportable** — decapsulation happens *inside* KMS and is audited |
+| `K_user`  | per-user vault key (random 256-bit)    | server DB (encrypted at rest under an app-level KMS data key); **rotation = revocation** |
+| `CEK`     | per-blob content key (random 256-bit)  | exists only inside the blob's wrapping; fresh on every login |
+
+### Issuing a blob (at login)
+
+Login is the only moment the password transits:
 
 ```
-KEK = Argon2id(pin ‖ server_pepper, salt)          # key-encryption key, derived on demand
-DEK = random 256-bit                               # per-credential data key
-usp_ct   = AES-256-GCM(DEK, usp_password)          # stored
-wrap_ct  = AES-256-GCM(KEK, DEK)                   # stored
+1. Client fetches the login public key:      GET /auth/login-key → {key_id, alg, public_key}
+2. Client HPKE-seals the password to it      (AAD: usp_username, encrypted_at)
+   and POSTs {usp_username, envelope} to /auth/login.
+   TLS protects transport; HPKE additionally hides the plaintext from
+   TLS-terminating infrastructure (load balancers, request logs, APM).
+3. Server (worker holding KMS access only) decapsulates, verifies the
+   credentials against USP live, creates the account on first login,
+   then builds the blob:
+
+     CEK     = random 256-bit
+     ct_pw   = AES-256-GCM(CEK,    usp_password, aad)
+     w1      = AES-256-GCM(K_user, CEK)              # wrap 1: per-user key
+     enc,w2  = HPKE_Seal(pk_kms,   w1)               # wrap 2: KMS key
+     blob    = base64url(version ‖ key_ids ‖ enc ‖ w2 ‖ ct_pw ‖ nonces ‖ issued_at)
+     aad     = user_id ‖ key_version ‖ issued_at
+
+4. Server returns {token, credential_blob} and zeroes every intermediate.
+   The client stores the blob in device secure storage (Keychain / Keystore).
 ```
 
-Stored columns: `usp_username`, `usp_ct` + nonce, `wrap_ct` + nonce, `salt`,
-`kdf_params`, and a key-check value. **Not stored:** the PIN, the KEK, or the
-DEK in the clear.
+### Using a blob (at sync)
 
-- **Unlock (to sync / verify):** the client sends the PIN over TLS; the server
-  derives the KEK in memory, unwraps the DEK, decrypts the USP password, uses
-  it, and zeroes it. The plaintext lives only in worker-process memory for the
-  duration of a sync — never in the DB, the job queue, or logs.
-- **`server_pepper`** is held outside the database (env / KMS). A PIN is
-  low-entropy, so the pepper is what makes a database-only leak non-brute-forceable.
-  Combined with Argon2id cost and PIN rate-limiting, this is the defense in depth.
-- **Change PIN** is cheap: unwrap the DEK with the old KEK, re-wrap with the new
-  one. The USP ciphertext is untouched.
-- **Forgotten PIN is unrecoverable by design** — there is no reset that yields
-  the old secret; the user simply re-enters their USP password under a new PIN.
+```
+POST /usp/sync {credential_blob, …}
+  worker: KMS decap (audited) → w1
+          AES-GCM(K_user)      → CEK
+          AES-GCM(CEK)         → usp_password   (in worker memory only)
+          fresh USP login → scrape → upsert → zero the plaintext
+```
+
+**No USP session caching.** Nothing USP-side survives a run: each `SyncRun`
+performs exactly one fresh USP login, uses that live session only within the
+run's own process memory for its page fetches, and discards it when the run
+ends. No session cookie is ever written to the DB, cache, or job queue.
+Operationally: syncs are serialized per user (`409` if one is running), and
+repeated USP auth failures back off and mark the run `failed` rather than
+retrying into an account lockout.
+
+### Breach math
+
+| Compromised                | Attacker gets                                          |
+| -------------------------- | ------------------------------------------------------ |
+| Device (blob)              | ciphertext only — undecryptable without KMS **and** DB |
+| Server DB                  | `K_user` values — useless without blobs **and** KMS    |
+| KMS access                 | nothing without blobs **and** `K_user`                 |
+| Device + DB                | still blocked: outer layer needs KMS decap             |
+| Device + KMS               | still blocked: inner wrap needs `K_user`               |
+| All three stores + blob    | one password — the residual, irreducible case          |
+
+Additional properties:
+
+- **Remote kill switch:** `DELETE /me/credential` rotates `K_user`, instantly
+  invalidating every blob on every device. Lost phone → one API call.
+- **Bounded lifetime:** `issued_at` is bound into the AAD; the server rejects
+  blobs older than the configured max age (e.g. 90 days), forcing a re-login,
+  which also rotates the CEK. Blobs are single-user by AAD — replaying one
+  against another account fails authentication of the ciphertext.
+- **Rotation:** `key_id`s in the blob header let `K_kms` rotate without
+  breaking outstanding blobs during a grace window.
 
 ### Honest limitation
 
-Because the PIN passes through the server at unlock time, this is *not*
-end-to-end zero-knowledge — a fully compromised server could capture a PIN in
-transit. True zero-knowledge would require decrypting on the client, but then
-the client would have to perform the USP scrape, defeating a server-side
-integration. We deliberately choose server-side decryption plus defense in depth
-(pepper outside the DB, Argon2id, strict PIN rate-limiting, ephemeral in-memory
-use, no secret logging), and we document the tradeoff rather than hide it.
+The server sees the plaintext password in worker memory for the seconds it
+takes to log into USP — at login and during each sync. That is inherent to
+server-side scraping; no key arrangement removes it. What this design
+guarantees is **nothing at rest**: a full dump of the database, backups, job
+queue, and logs contains zero credentials. We document the tradeoff rather
+than hide it.
 
 ## Domain model at a glance
 
 ```
-User ─┬─ (Accounts)  password hash, tokens
-      ├─ (Vault)     UspCredential  ── encrypted USP password
+User ─┬─ (Accounts)     usp_username, tokens — no password stored
+      ├─ (Credentials)  CredentialKey (K_user, version) — never the credential
       ├─< Semester ─< Enrollment ─┬─< Meeting
       │                           ├─< Grade
       │                           └─< Absence
@@ -174,17 +217,17 @@ UspSync: SyncRun ─▶ Usp.Client ─▶ USP ; mappers ─▶ upsert Planner by
 
 - **Versioning** — everything under `/api/v1`.
 - **Auth** — `Authorization: Bearer <token>`; unauthenticated → `401`.
-- **PIN** — only ever accepted in the request body of vault/sync endpoints over
-  TLS, never in a URL or query string, never logged.
+- **Secrets in flight** — the login envelope and credential blob are accepted
+  only in JSON request bodies over TLS; never in URLs or query strings, never
+  logged. Endpoints that carry them are strictly rate-limited.
 - **Authorization** — ownership enforced in the context query (`where user_id ==
   current_user.id`); foreign records return `404` (no existence leak).
 - **Errors** — one envelope via a `FallbackController`:
-  `{"errors": {"detail": "...", "fields": {"email": ["can't be blank"]}}}`.
-  Honest status codes: `401` / `403` / `404` / `409` / `422`.
+  `{"errors": {"detail": "...", "fields": {"title": ["can't be blank"]}}}`.
+  Honest status codes: `401` / `403` / `404` / `409` / `422` / `429`.
 - **Pagination** — page-based `?page=&page_size=` with a `meta` block; bounded max.
 - **Filtering/sorting** — whitelisted query params only.
 - **Provenance** — `source` + `external_ref` on importable rows; re-sync upserts,
   never duplicates, never overwrites manual edits.
 - **Time** — UTC (`utc_datetime`); `Meeting` uses wall-clock `time` + weekday.
 - **IDs** — UUID primary keys on user-facing resources.
-- **Rate limiting** — stricter limits on `/auth/*` and on PIN-bearing endpoints.

@@ -4,10 +4,13 @@ The backend API for **heidy** — a student academic organizer. heidy helps
 students keep their whole semester in one place: their classes and weekly
 schedule, assignments and exams, grades, and attendance.
 
-v1 targets **USP** (Universidade de São Paulo): a student connects their USP
-account and heidy imports their schedule, disciplines, grades and absences, on
-top of which they plan their own tasks. Schemas are written
-university-agnostic, so a second university is additive rather than a rewrite.
+v1 targets **USP** (Universidade de São Paulo). The heidy account **is** the
+USP account: login verifies against USP live, and heidy imports the student's
+schedule, disciplines, grades and absences, on top of which they plan their own
+tasks. **No credentials are stored server-side, ever** — the client holds an
+opaque, three-key-wrapped credential blob it cannot read, used in worker memory
+per sync and discarded. Schemas are written university-agnostic, so a second
+university is additive rather than a rewrite.
 
 Built with **Elixir** and **Phoenix** as a JSON API.
 
@@ -17,13 +20,14 @@ Built with **Elixir** and **Phoenix** as a JSON API.
 - **Ecto / PostgreSQL** — persistence
 - **Phoenix contexts** — domain boundaries
 - Token-based auth (`Bearer` tokens), versioned under `/api/v1`
+- **HPKE + KMS envelope crypto** for the USP credential (nothing at rest)
 
 ## Design
 
 The API design lives in [`docs/`](docs/):
 
 - [`docs/architecture.md`](docs/architecture.md) — bounded contexts, domain
-  model, the USP credential vault (PIN-based envelope encryption), and
+  model, the three-key credential envelope (no credentials at rest), and
   cross-cutting conventions.
 - [`docs/api.md`](docs/api.md) — the full endpoint reference: request/response
   formats, per-field input constraints, and status codes.
@@ -38,8 +42,8 @@ web layer in `lib/heidy_web`:
 ```
 lib/
   heidy/                  # domain — contexts own the business logic
-    accounts/             # users, auth tokens (one-way password hash)
-    vault/                # encrypted USP credential (PIN-based envelope encryption)
+    accounts/             # users, auth tokens — no passwords stored
+    credentials/          # credential blob issue/unwrap/revoke; per-user vault key
     catalog/              # universities, units, courses, disciplines (reference data)
     planner/              # semesters, enrollments, meetings, tasks, grades, absences
     usp_sync/             # USP integration: Usp.Client behaviour, mappers, SyncRun, Oban worker

@@ -19,10 +19,21 @@ input constraints, and status codes.
 
 ## 1. Conventions
 
-### 1.1 Authentication
+### 1.1 Authentication & identity
 
-Obtain a token from `POST /auth/register` or `POST /auth/login`, then send it on
-every 🔒 request:
+The heidy account **is** the USP account. There is no separate heidy password,
+no registration, and no password-reset flow: `POST /auth/login` verifies the
+USP number + Senha Única against USP live and creates the account on first
+success.
+
+Login returns two artifacts:
+
+| Artifact          | Purpose                       | Client storage                          |
+| ----------------- | ----------------------------- | ---------------------------------------- |
+| `token`           | Bearer token for API requests | normal app storage                       |
+| `credential_blob` | opaque ciphertext of the USP credential, decryptable only server-side with three keys | device secure storage (Keychain / Keystore) |
+
+Send the token on every 🔒 request:
 
 ```
 Authorization: Bearer 8f3c…d21a
@@ -31,12 +42,29 @@ Authorization: Bearer 8f3c…d21a
 Missing/invalid/expired token → `401`. Valid token but not the owner of the
 resource → `404` (we do not disclose existence of others' records).
 
-### 1.2 The PIN
+### 1.2 The credential envelope and blob
 
-Vault and sync endpoints require the user's **USP PIN** to unlock the encrypted
-USP credential. The PIN is accepted **only** in the JSON request body, over TLS,
-and is never logged, never returned, and never placed in a URL or query string.
-A wrong PIN → `403` with `"detail": "invalid pin"`. PIN attempts are rate-limited.
+**heidy stores no credentials, ever.** The flow:
+
+1. `GET /auth/login-key` → the server's current HPKE public key.
+2. The client **HPKE-seals the password client-side** and sends the resulting
+   envelope to `POST /auth/login`. TLS protects transport; the envelope
+   additionally hides the plaintext from TLS-terminating infrastructure.
+3. The server verifies against USP, returns a `credential_blob`, and discards
+   all plaintext. The blob is wrapped under three keys (per-blob CEK →
+   per-user `K_user` in the DB → KMS-held HPKE key); no single store — device,
+   database, or KMS — can decrypt it alone.
+4. Sync endpoints (📦) take the blob in the request body; the worker decrypts
+   in memory, performs one fresh USP login, and zeroes the plaintext. USP
+   sessions are never cached across runs.
+5. `DELETE /me/credential` rotates `K_user` — a remote kill switch that
+   invalidates every blob on every device.
+
+Envelopes and blobs are accepted **only** in JSON request bodies over TLS —
+never in URLs or query strings — and are never logged or returned by any read
+endpoint. Blobs expire (server-configured max age, e.g. 90 days); an expired or
+revoked blob → `403` with `"detail": "credential_blob expired or revoked"`,
+and the client re-logs-in to obtain a fresh one.
 
 ### 1.3 Response envelopes
 
@@ -61,7 +89,7 @@ A wrong PIN → `403` with `"detail": "invalid pin"`. PIN attempts are rate-limi
 {
   "errors": {
     "detail": "Validation failed",
-    "fields": { "email": ["can't be blank"], "score": ["must be >= 0"] }
+    "fields": { "title": ["can't be blank"], "score": ["must be >= 0"] }
   }
 }
 ```
@@ -71,18 +99,20 @@ A wrong PIN → `403` with `"detail": "invalid pin"`. PIN attempts are rate-limi
 
 ### 1.4 Status codes
 
-| Code | Meaning                                                        |
-| ---- | ------------------------------------------------------------- |
-| 200  | OK                                                            |
-| 201  | Created (body contains the new resource)                     |
-| 204  | No content (successful delete)                               |
-| 400  | Malformed request (bad JSON, wrong type)                     |
-| 401  | Missing/invalid auth token                                   |
-| 403  | Authenticated but forbidden (e.g. wrong PIN)                 |
-| 404  | Not found / not owned                                        |
-| 409  | Conflict (e.g. duplicate semester label, email taken)        |
-| 422  | Validation failed (see `fields`)                             |
-| 429  | Rate limited (`Retry-After` header)                          |
+| Code | Meaning                                                          |
+| ---- | ---------------------------------------------------------------- |
+| 200  | OK                                                               |
+| 201  | Created (body contains the new resource)                        |
+| 202  | Accepted (async work started)                                    |
+| 204  | No content (successful delete)                                   |
+| 400  | Malformed request (bad JSON, wrong type)                        |
+| 401  | Missing/invalid auth token, or USP rejected the credentials     |
+| 403  | Authenticated but forbidden (expired/revoked credential blob)   |
+| 404  | Not found / not owned                                           |
+| 409  | Conflict (duplicate, overlap, sync already running)             |
+| 422  | Validation failed (see `fields`)                                |
+| 429  | Rate limited (`Retry-After` header)                             |
+| 502  | USP unreachable                                                 |
 
 ### 1.5 Pagination, filtering, sorting
 
@@ -94,30 +124,28 @@ A wrong PIN → `403` with `"detail": "invalid pin"`. PIN attempts are rate-limi
 
 - Unknown/extra fields in a body are ignored (not an error).
 - Strings are trimmed; empty string ≠ `null` (empty may fail `required`).
-- All lengths are in characters. All monetary/score numbers are decimals sent as
-  JSON numbers.
 - `id` path params must be UUIDs; a non-UUID → `404`.
+- Binary values (envelope parts, blobs) are base64/base64url strings.
 
 ---
 
 ## 2. Data types & enums
 
-| Enum              | Values                                             |
-| ----------------- | -------------------------------------------------- |
+| Enum              | Values                                                  |
+| ----------------- | ------------------------------------------------------- |
 | `task.kind`       | `assignment` · `exam` · `reading` · `project` · `other` |
-| `task.status`     | `todo` · `doing` · `done`                          |
-| `task.priority`   | `low` · `normal` · `high`                          |
-| `day_of_week`     | `1`=Mon … `7`=Sun (ISO)                            |
-| `source`          | `manual` · `usp` (read-only; set by the system)    |
-| `sync.source`     | `schedule` · `grades` · `absences` · `disciplines` |
-| `sync.status`     | `pending` · `running` · `succeeded` · `failed`     |
-| `credential.status` | `unverified` · `verified` · `invalid`            |
+| `task.status`     | `todo` · `doing` · `done`                               |
+| `task.priority`   | `low` · `normal` · `high`                               |
+| `day_of_week`     | `1`=Mon … `7`=Sun (ISO)                                 |
+| `source`          | `manual` · `usp` (read-only; set by the system)         |
+| `sync.source`     | `schedule` · `grades` · `absences` · `disciplines`      |
+| `sync.status`     | `pending` · `running` · `succeeded` · `failed`          |
 
 ---
 
 ## 3. Endpoints
 
-Legend: 🔓 public · 🔒 auth · 🔑 requires PIN in body
+Legend: 🔓 public · 🔒 auth · 📦 requires `credential_blob` in body
 
 ### 3.1 Health
 
@@ -128,155 +156,114 @@ Liveness/readiness probe. → `200 {"status":"ok","version":"…"}`.
 
 ### 3.2 Auth
 
-#### `POST /auth/register` 🔓
+#### `GET /auth/login-key` 🔓
+The server's current HPKE public key for sealing the login envelope.
+Cacheable; rotates via `key_id`.
 
-| Field      | Type   | Required | Constraints                                        |
-| ---------- | ------ | -------- | -------------------------------------------------- |
-| `email`    | string | yes      | valid email, ≤ 160 chars, unique (`409` if taken)  |
-| `password` | string | yes      | 8–72 chars, at least one letter and one digit      |
-| `name`     | string | yes      | 1–80 chars                                         |
-
-**201**
+**200**
 ```json
-{ "data": { "user": { "id":"…", "email":"a@usp.br", "name":"Ana" },
-            "token": "…", "token_expires_at": "2026-08-07T00:00:00Z" } }
+{ "data": { "key_id": "k1", "alg": "HPKE-X25519-HKDF-SHA256+CHACHA20POLY1305",
+            "public_key": "base64…" } }
 ```
-Errors: `422` (validation), `409` (email taken).
 
 #### `POST /auth/login` 🔓
+Verify USP credentials live and start a session. **Creates the account on the
+first successful login.** Strictly rate-limited.
 
-| Field      | Type   | Required | Constraints |
-| ---------- | ------ | -------- | ----------- |
-| `email`    | string | yes      | valid email |
-| `password` | string | yes      | non-empty   |
+| Field          | Type   | Required | Constraints                                       |
+| -------------- | ------ | -------- | -------------------------------------------------- |
+| `usp_username` | string | yes      | USP number, 6–12 digits                            |
+| `envelope`     | object | yes      | HPKE envelope of the Senha Única (see below)       |
 
-**200** → same shape as register. Bad credentials → `401` (`"invalid email or
-password"`, deliberately not distinguishing which). Rate-limited.
+`envelope`:
+
+| Field          | Type   | Required | Constraints                                        |
+| -------------- | ------ | -------- | --------------------------------------------------- |
+| `key_id`       | string | yes      | a currently valid key id from `/auth/login-key`     |
+| `enc`          | string | yes      | base64 KEM encapsulation, ≤ 128 chars               |
+| `ciphertext`   | string | yes      | base64 sealed password, ≤ 512 chars                 |
+| `encrypted_at` | string | yes      | ISO 8601; server rejects envelopes older than 5 min |
+
+**200**
+```json
+{ "data": {
+    "user":  { "id":"…", "usp_username":"1234567", "name":"Ana" },
+    "token": "…", "token_expires_at": "2026-08-07T00:00:00Z",
+    "credential_blob": {
+      "blob": "base64url…", "key_version": 3,
+      "issued_at": "2026-07-08T12:00:00Z", "expires_at": "2026-10-06T12:00:00Z"
+    } } }
+```
+
+The client must store `credential_blob.blob` in device secure storage; it is
+required for sync and cannot be re-fetched (only re-issued by logging in again).
+
+Errors: `401` (USP rejected the credentials), `422` (format, unknown/expired
+`key_id`, stale `encrypted_at`), `429`, `502` (USP unreachable).
 
 #### `DELETE /auth/logout` 🔒
-Revokes the current token. **204**.
-
-#### `POST /auth/password/forgot` 🔓
-Body: `email` (string). Always **202** (does not reveal whether the email
-exists). Sends a reset token if it does.
-
-#### `POST /auth/password/reset` 🔓
-
-| Field      | Type   | Required | Constraints                       |
-| ---------- | ------ | -------- | --------------------------------- |
-| `token`    | string | yes      | valid, unexpired reset token      |
-| `password` | string | yes      | 8–72 chars, one letter + one digit |
-
-**200** on success; `422`/`401` otherwise. (Resetting the heidy password does
-**not** affect the USP credential/PIN.)
+Revokes the current token (the credential blob on the device is unaffected —
+revoke blobs with `DELETE /me/credential`). **204**.
 
 ---
 
 ### 3.3 Current user
 
 #### `GET /me` 🔒
-**200** → the user profile, including `usp_credential` metadata:
+**200**
 ```json
-{ "data": { "id":"…", "email":"ana@usp.br", "name":"Ana",
-            "university": { "id":"…", "acronym":"USP" },
-            "usp_credential": { "connected": true, "status":"verified",
-                                "usp_username":"1234567", "last_verified_at":"2026-07-08T12:00:00Z" } } }
+{ "data": { "id":"…", "usp_username":"1234567", "name":"Ana",
+            "email": "ana@usp.br",
+            "course": { "id":"…", "name":"BCC" },
+            "credential": { "key_version": 3, "last_login_at":"2026-07-08T12:00:00Z" } } }
 ```
 
 #### `PATCH /me` 🔒
 
-| Field           | Type   | Required | Constraints                    |
-| --------------- | ------ | -------- | ------------------------------ |
-| `name`          | string | no       | 1–80 chars                     |
-| `university_id` | uuid   | no       | must exist in catalog          |
-| `course_id`     | uuid   | no       | must exist and belong to the university |
+| Field       | Type   | Required | Constraints                          |
+| ----------- | ------ | -------- | ------------------------------------ |
+| `name`      | string | no       | 1–80 chars                           |
+| `email`     | string | no       | valid email, ≤ 160 chars, or `null`  |
+| `course_id` | uuid   | no       | must exist in the catalog            |
 
-**200** → updated profile.
+**200** → updated profile. At least one field required.
 
-#### `PUT /me/password` 🔒
-
-| Field              | Type   | Required | Constraints                        |
-| ------------------ | ------ | -------- | ---------------------------------- |
-| `current_password` | string | yes      | must match (else `403`)            |
-| `new_password`     | string | yes      | 8–72 chars, one letter + one digit |
-
-**200** (token stays valid) — or configurable to rotate tokens.
+#### `DELETE /me/credential` 🔒
+**Remote kill switch.** Rotates the per-user vault key (`K_user`), instantly
+invalidating **every** credential blob issued to any of the user's devices.
+Use after a lost/stolen device. Subsequent syncs fail with `403` until the
+user logs in again. **204**.
 
 #### `DELETE /me` 🔒
-Deletes the account and all owned data (semesters, enrollments, tasks, vault).
-Requires `password` in body as confirmation. **204**.
+Deletes the account and all owned data (semesters, enrollments, tasks,
+credential key). Rate-limited. **204**.
 
 ---
 
-### 3.4 USP credential vault 🔑
+### 3.4 USP sync 📦
 
-Stores the reversible, PIN-encrypted USP login. The secret and PIN are never
-returned by any endpoint.
-
-#### `POST /me/usp-credential` 🔒🔑
-Create or replace the stored USP credential.
-
-| Field          | Type   | Required | Constraints                                            |
-| -------------- | ------ | -------- | ------------------------------------------------------ |
-| `usp_username` | string | yes      | USP number, 6–12 digits                                |
-| `usp_password` | string | yes      | 1–128 chars (USP Senha Única); encrypted at rest, never stored in clear |
-| `pin`          | string | yes      | 4–12 digits; encrypts the credential; **not** stored   |
-| `verify`       | bool   | no       | default `true` — validate against USP before saving    |
-
-**201**
-```json
-{ "data": { "connected": true, "status": "verified",
-            "usp_username": "1234567", "last_verified_at": "2026-07-08T12:00:00Z" } }
-```
-Errors: `422` (format), `403` (`verify:true` and USP rejected the credentials),
-`502` (USP unreachable).
-
-#### `GET /me/usp-credential` 🔒
-Metadata only — **never** the secret or PIN.
-```json
-{ "data": { "connected": true, "status":"verified",
-            "usp_username":"1234567", "last_verified_at":"…" } }
-```
-Not connected → `200 {"data":{"connected":false}}`.
-
-#### `PUT /me/usp-credential/pin` 🔒🔑
-Rotate the PIN (re-wraps the data key; USP ciphertext untouched).
-
-| Field     | Type   | Required | Constraints                 |
-| --------- | ------ | -------- | --------------------------- |
-| `pin`     | string | yes      | current PIN (else `403`)    |
-| `new_pin` | string | yes      | 4–12 digits, ≠ current PIN  |
-
-**200**. Note: a forgotten PIN cannot be recovered — re-`POST` the credential.
-
-#### `POST /me/usp-credential/verify` 🔒🔑
-Body: `pin`. Unlocks and tests the credential against USP live. **200** with
-updated `status`/`last_verified_at`; `403` on wrong PIN or USP rejection.
-
-#### `DELETE /me/usp-credential` 🔒
-Removes the stored credential. **204**.
-
----
-
-### 3.5 USP sync 🔑
-
-#### `POST /usp/sync` 🔒🔑
+#### `POST /usp/sync` 🔒📦
 Kick off an import. Returns immediately; the login+scrape runs in a supervised
-worker (the decrypted credential lives only in that worker's memory).
+worker. The worker decrypts the blob in memory (KMS decap → `K_user` unwrap →
+CEK), performs **one fresh USP login** — sessions are never cached across
+runs — scrapes, upserts, and zeroes the plaintext.
 
-| Field     | Type      | Required | Constraints                                                       |
-| --------- | --------- | -------- | ----------------------------------------------------------------- |
-| `pin`     | string    | yes      | unlocks the credential (else `403`)                               |
-| `sources` | string[]  | no       | subset of `schedule`,`grades`,`absences`,`disciplines`; default = all |
-| `semester_id` | uuid  | no       | target an existing semester; default = current/active            |
+| Field             | Type     | Required | Constraints                                                        |
+| ----------------- | -------- | -------- | ------------------------------------------------------------------ |
+| `credential_blob` | string   | yes      | base64url, ≤ 4096 chars; must be valid, unexpired, unrevoked, and issued to this user |
+| `sources`         | string[] | no       | unique subset of `schedule`,`grades`,`absences`,`disciplines`; default = all |
+| `semester_id`     | uuid     | no       | target an existing semester; default = current/active              |
 
 **202**
 ```json
 { "data": { "id":"…", "status":"pending", "sources":["schedule","grades"],
             "created_at":"2026-07-08T12:00:00Z" } }
 ```
-Errors: `403` (bad PIN / no credential), `409` (a sync is already running),
-`422` (unknown source).
+
+Errors: `403` (blob expired/revoked/foreign → re-login), `409` (a sync is
+already running for this user — syncs are serialized per user), `422`
+(unknown source), `502` (USP unreachable). Repeated USP auth failures mark the
+run `failed` and back off rather than retrying into an account lockout.
 
 #### `GET /usp/sync/:id` 🔒
 Poll a run.
@@ -291,7 +278,7 @@ Paginated list of recent runs (newest first). Filter `?status=`.
 
 ---
 
-### 3.6 Semesters
+### 3.5 Semesters
 
 #### `GET /semesters` 🔒
 Paginated list of the user's semesters. Filter `?active=true`. Sort
@@ -299,12 +286,12 @@ Paginated list of the user's semesters. Filter `?active=true`. Sort
 
 #### `POST /semesters` 🔒
 
-| Field        | Type   | Required | Constraints                                  |
-| ------------ | ------ | -------- | -------------------------------------------- |
-| `label`      | string | yes      | 1–20 chars, unique per user (`409` if dup)   |
-| `start_date` | date   | yes      | `YYYY-MM-DD`                                 |
-| `end_date`   | date   | yes      | ≥ `start_date`                               |
-| `active`     | bool   | no       | default `false`; setting `true` unsets others |
+| Field        | Type   | Required | Constraints                                   |
+| ------------ | ------ | -------- | ---------------------------------------------- |
+| `label`      | string | yes      | 1–20 chars, unique per user (`409` if dup)     |
+| `start_date` | date   | yes      | `YYYY-MM-DD`                                   |
+| `end_date`   | date   | yes      | ≥ `start_date`                                 |
+| `active`     | bool   | no       | default `false`; setting `true` unsets others  |
 
 **201** → the semester.
 
@@ -314,7 +301,7 @@ to its enrollments/meetings/grades/absences → **204**.
 
 ---
 
-### 3.7 Enrollments (the student's classes)
+### 3.6 Enrollments (the student's classes)
 
 #### `GET /enrollments` 🔒
 Filter `?semester_id=` (recommended), `?source=usp|manual`. Includes `meetings`.
@@ -322,14 +309,14 @@ Filter `?semester_id=` (recommended), `?source=usp|manual`. Includes `meetings`.
 #### `POST /enrollments` 🔒
 
 | Field           | Type   | Required | Constraints                                              |
-| --------------- | ------ | -------- | -------------------------------------------------------- |
-| `semester_id`   | uuid   | yes      | must be owned by the user                                |
-| `title`         | string | cond.    | 1–120 chars; required unless `discipline_id` is given    |
+| --------------- | ------ | -------- | --------------------------------------------------------- |
+| `semester_id`   | uuid   | yes      | must be owned by the user                                 |
+| `title`         | string | cond.    | 1–120 chars; required unless `discipline_id` is given     |
 | `discipline_id` | uuid   | no       | catalog discipline; fills `title`/credits if `title` omitted |
-| `professor`     | string | no       | ≤ 120 chars                                              |
-| `credits`       | int    | no       | 0–40                                                     |
-| `color`         | string | no       | hex `#RRGGBB`                                            |
-| `absence_limit` | int    | no       | 0–200 (max allowed absences)                            |
+| `professor`     | string | no       | ≤ 120 chars                                               |
+| `credits`       | int    | no       | 0–40                                                      |
+| `color`         | string | no       | hex `#RRGGBB`                                             |
+| `absence_limit` | int    | no       | 0–200 (max allowed absences)                              |
 
 **201**. Duplicate (same `discipline_id` in the same semester) → `409`.
 `source` is `manual` for API-created rows (USP rows are created by sync).
@@ -340,19 +327,19 @@ PATCH: subset of writable fields. Editing a USP-imported enrollment sets a
 
 ---
 
-### 3.8 Meetings (weekly schedule of a class)
+### 3.7 Meetings (weekly schedule of a class)
 
 #### `GET /enrollments/:id/meetings` 🔒
 List slots for a class.
 
 #### `POST /enrollments/:id/meetings` 🔒
 
-| Field         | Type   | Required | Constraints                                  |
-| ------------- | ------ | -------- | -------------------------------------------- |
-| `day_of_week` | int    | yes      | 1–7 (Mon–Sun)                                |
-| `starts_at`   | time   | yes      | `HH:MM`                                      |
-| `ends_at`     | time   | yes      | `HH:MM`, strictly after `starts_at`          |
-| `location`    | string | no       | ≤ 120 chars                                  |
+| Field         | Type   | Required | Constraints                             |
+| ------------- | ------ | -------- | ---------------------------------------- |
+| `day_of_week` | int    | yes      | 1–7 (Mon–Sun)                            |
+| `starts_at`   | time   | yes      | `HH:MM`                                  |
+| `ends_at`     | time   | yes      | `HH:MM`, strictly after `starts_at`      |
+| `location`    | string | no       | ≤ 120 chars                              |
 
 **201**. Overlapping the same day/time of another meeting in the same semester →
 `409`.
@@ -370,7 +357,7 @@ Computed weekly grid. Requires `?semester_id=`.
 
 ---
 
-### 3.9 Tasks
+### 3.8 Tasks
 
 #### `GET /tasks` 🔒
 Filters: `?semester_id=`, `?enrollment_id=`, `?status=`, `?kind=`,
@@ -379,15 +366,15 @@ Filters: `?semester_id=`, `?enrollment_id=`, `?status=`, `?kind=`,
 
 #### `POST /tasks` 🔒
 
-| Field           | Type   | Required | Constraints                                    |
-| --------------- | ------ | -------- | ---------------------------------------------- |
-| `title`         | string | yes      | 1–160 chars                                    |
-| `enrollment_id` | uuid   | no       | must be owned by the user                      |
-| `kind`          | enum   | no       | see enums; default `assignment`                |
-| `notes`         | string | no       | ≤ 5 000 chars                                  |
-| `due_at`        | datetime | no     | ISO 8601; if `enrollment_id` set, warns (not errors) when outside the semester dates |
-| `priority`      | enum   | no       | `low`/`normal`/`high`; default `normal`        |
-| `status`        | enum   | no       | default `todo`                                 |
+| Field           | Type     | Required | Constraints                                    |
+| --------------- | -------- | -------- | ----------------------------------------------- |
+| `title`         | string   | yes      | 1–160 chars                                     |
+| `enrollment_id` | uuid     | no       | must be owned by the user                       |
+| `kind`          | enum     | no       | see enums; default `assignment`                 |
+| `notes`         | string   | no       | ≤ 5 000 chars                                   |
+| `due_at`        | datetime | no       | ISO 8601                                        |
+| `priority`      | enum     | no       | `low`/`normal`/`high`; default `normal`         |
+| `status`        | enum     | no       | default `todo`                                  |
 
 **201**.
 
@@ -399,19 +386,19 @@ Body: `status` (enum, required). Convenience transition. **200**.
 
 ---
 
-### 3.10 Grades
+### 3.9 Grades
 
 #### `GET /enrollments/:id/grades` 🔒
 List grade entries for a class.
 
 #### `POST /enrollments/:id/grades` 🔒
 
-| Field       | Type    | Required | Constraints                          |
-| ----------- | ------- | -------- | ------------------------------------ |
-| `label`     | string  | yes      | 1–80 chars (e.g. "P1")               |
-| `score`     | decimal | no       | 0 ≤ score ≤ `max_score`; null = ungraded |
-| `max_score` | decimal | no       | > 0; default `10`                    |
-| `weight`    | decimal | no       | > 0; default `1`                     |
+| Field       | Type    | Required | Constraints                              |
+| ----------- | ------- | -------- | ----------------------------------------- |
+| `label`     | string  | yes      | 1–80 chars (e.g. "P1")                    |
+| `score`     | decimal | no       | 0 ≤ score ≤ `max_score`; null = ungraded  |
+| `max_score` | decimal | no       | > 0; default `10`                         |
+| `weight`    | decimal | no       | > 0; default `1`                          |
 
 **201**.
 
@@ -427,18 +414,18 @@ Computed.
 
 ---
 
-### 3.11 Absences (attendance)
+### 3.10 Absences (attendance)
 
 #### `GET /enrollments/:id/absences` 🔒
 List recorded absences.
 
 #### `POST /enrollments/:id/absences` 🔒
 
-| Field   | Type   | Required | Constraints                                   |
-| ------- | ------ | -------- | --------------------------------------------- |
-| `date`  | date   | yes      | `YYYY-MM-DD`, within the semester             |
-| `count` | int    | no       | 1–10 (some sessions count double); default `1` |
-| `note`  | string | no       | ≤ 200 chars                                   |
+| Field   | Type   | Required | Constraints                                     |
+| ------- | ------ | -------- | ------------------------------------------------ |
+| `date`  | date   | yes      | `YYYY-MM-DD`, within the semester                |
+| `count` | int    | no       | 1–10 (some sessions count double); default `1`   |
+| `note`  | string | no       | ≤ 200 chars                                      |
 
 **201**.
 
@@ -453,7 +440,7 @@ Computed.
 
 ---
 
-### 3.12 Catalog (USP reference data, read-only)
+### 3.11 Catalog (USP reference data, read-only)
 
 #### `GET /universities` 🔓
 Search `?q=` (≤ 80 chars). Paginated.
@@ -475,12 +462,10 @@ Discipline detail.
 | Method · Path | Auth |
 | --- | --- |
 | GET `/health` | 🔓 |
-| POST `/auth/register` · `/auth/login` | 🔓 |
+| GET `/auth/login-key` · POST `/auth/login` | 🔓 |
 | DELETE `/auth/logout` | 🔒 |
-| POST `/auth/password/forgot` · `/auth/password/reset` | 🔓 |
-| GET · PATCH · DELETE `/me` · PUT `/me/password` | 🔒 |
-| POST · GET · DELETE `/me/usp-credential` · PUT `/me/usp-credential/pin` · POST `/me/usp-credential/verify` | 🔒🔑 |
-| POST · GET `/usp/sync` · GET `/usp/sync/:id` | 🔒🔑 |
+| GET · PATCH · DELETE `/me` · DELETE `/me/credential` | 🔒 |
+| POST `/usp/sync` 📦 · GET `/usp/sync` · GET `/usp/sync/:id` | 🔒 |
 | GET · POST `/semesters` · GET · PATCH · DELETE `/semesters/:id` | 🔒 |
 | GET · POST `/enrollments` · GET · PATCH · DELETE `/enrollments/:id` | 🔒 |
 | GET · POST `/enrollments/:id/meetings` · PATCH · DELETE `/meetings/:id` · GET `/schedule` | 🔒 |
