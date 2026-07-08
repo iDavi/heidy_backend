@@ -1,4 +1,13 @@
 defmodule HeidyApi.ApiContractCase do
+  @moduledoc """
+  Shared setup for the `/api/v1` contract tests.
+
+  These tests describe the shape of the HTTP API before the Phoenix
+  implementation exists. They are written to read like plain English:
+  every test follows an Arrange / Act / Assert structure and always
+  declares the expected result before checking it, so that a product
+  manager can read a test and understand what the endpoint promises.
+  """
   use ExUnit.CaseTemplate
 
   @endpoint Module.concat(HeidyApiWeb, Endpoint)
@@ -13,17 +22,23 @@ defmodule HeidyApi.ApiContractCase do
     end
   end
 
+  @doc "Builds the full path for a versioned API route (e.g. `/api/v1/health`)."
+  def api_path(path), do: "/api/v1" <> path
+
+  @doc "A JSON request that is not authenticated."
   def api_conn do
     Phoenix.ConnTest.build_conn()
     |> Plug.Conn.put_req_header("accept", "application/json")
     |> Plug.Conn.put_req_header("content-type", "application/json")
   end
 
+  @doc "A JSON request carrying a valid bearer token."
   def auth_conn do
     api_conn()
     |> Plug.Conn.put_req_header("authorization", "Bearer test-token")
   end
 
+  @doc "Asserts the response status and decodes the JSON body (or `nil` when empty)."
   def json_response(conn, status) do
     assert conn.status == status
 
@@ -33,11 +48,13 @@ defmodule HeidyApi.ApiContractCase do
     end
   end
 
+  @doc "Unwraps a single-resource envelope: `%{\"data\" => resource}`."
   def assert_data_envelope(body) do
     assert %{"data" => data} = body
     data
   end
 
+  @doc "Unwraps a paginated list envelope: `%{\"data\" => [...], \"meta\" => %{...}}`."
   def assert_list_envelope(body) do
     assert %{"data" => data, "meta" => meta} = body
     assert is_list(data)
@@ -48,11 +65,13 @@ defmodule HeidyApi.ApiContractCase do
     data
   end
 
+  @doc "Asserts a validation-error envelope that mentions the given field."
   def assert_validation_error(body, field) do
     assert %{"errors" => %{"detail" => "Validation failed", "fields" => fields}} = body
     assert Map.has_key?(fields, field)
   end
 
+  @doc "A stable example UUID for path parameters."
   def uuid, do: "018fb8f6-4673-7a9f-bb64-8e4f28d57921"
 
   def login_input do
