@@ -4,6 +4,11 @@ The backend API for **heidy** — a student academic organizer. heidy helps
 students keep their whole semester in one place: their classes and weekly
 schedule, assignments and exams, grades, and attendance.
 
+v1 targets **USP** (Universidade de São Paulo): a student connects their USP
+account and heidy imports their schedule, disciplines, grades and absences, on
+top of which they plan their own tasks. Schemas are written
+university-agnostic, so a second university is additive rather than a rewrite.
+
 Built with **Elixir** and **Phoenix** as a JSON API.
 
 ## Stack
@@ -18,8 +23,10 @@ Built with **Elixir** and **Phoenix** as a JSON API.
 The API design lives in [`docs/`](docs/):
 
 - [`docs/architecture.md`](docs/architecture.md) — bounded contexts, domain
-  model, and cross-cutting conventions.
-- [`docs/api.md`](docs/api.md) — the full endpoint reference.
+  model, the USP credential vault (PIN-based envelope encryption), and
+  cross-cutting conventions.
+- [`docs/api.md`](docs/api.md) — the full endpoint reference: request/response
+  formats, per-field input constraints, and status codes.
 
 ## Project layout
 
@@ -29,9 +36,11 @@ web layer in `lib/heidy_web`:
 ```
 lib/
   heidy/                  # domain — contexts own the business logic
-    accounts/             # users, auth tokens
-    catalog/              # universities, courses, subjects (reference data)
+    accounts/             # users, auth tokens (one-way password hash)
+    vault/                # encrypted USP credential (PIN-based envelope encryption)
+    catalog/              # universities, units, courses, disciplines (reference data)
     planner/              # semesters, enrollments, meetings, tasks, grades, absences
+    usp_sync/             # USP integration: Usp.Client behaviour, mappers, SyncRun, Oban worker
   heidy_web/              # web layer — thin controllers, JSON views, plugs
     controllers/
     plugs/
