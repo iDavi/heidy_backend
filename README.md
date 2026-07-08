@@ -27,6 +27,8 @@ The API design lives in [`docs/`](docs/):
   cross-cutting conventions.
 - [`docs/api.md`](docs/api.md) — the full endpoint reference: request/response
   formats, per-field input constraints, and status codes.
+- [`docs/openapi.json`](docs/openapi.json) — the authoritative machine-readable
+  **OpenAPI 3.1** contract (JSON Schema for every input/output and constraint).
 
 ## Project layout
 

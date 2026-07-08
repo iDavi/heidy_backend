@@ -3,6 +3,11 @@
 Complete reference for the heidy v1 API: endpoints, request/response formats,
 input constraints, and status codes.
 
+> **Machine-readable contract:** [`docs/openapi.json`](openapi.json) is the
+> authoritative OpenAPI 3.1 spec — every request/response body and field
+> constraint (types, lengths, patterns, ranges, enums, required/optional) is
+> expressed as JSON Schema there. This document is the prose companion.
+
 - **Base URL:** `/api/v1`
 - **Content type:** `application/json` for requests and responses (UTF-8).
 - **Auth:** `Authorization: Bearer <token>` on 🔒 endpoints.
