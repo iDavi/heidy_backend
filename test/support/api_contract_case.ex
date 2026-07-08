@@ -1,0 +1,137 @@
+defmodule HeidyApi.ApiContractCase do
+  use ExUnit.CaseTemplate
+
+  @endpoint Module.concat(HeidyApiWeb, Endpoint)
+
+  using do
+    quote do
+      import Phoenix.ConnTest, except: [json_response: 2]
+      import Plug.Conn
+      import HeidyApi.ApiContractCase
+
+      @endpoint unquote(@endpoint)
+    end
+  end
+
+  def api_conn do
+    Phoenix.ConnTest.build_conn()
+    |> Plug.Conn.put_req_header("accept", "application/json")
+    |> Plug.Conn.put_req_header("content-type", "application/json")
+  end
+
+  def auth_conn do
+    api_conn()
+    |> Plug.Conn.put_req_header("authorization", "Bearer test-token")
+  end
+
+  def json_response(conn, status) do
+    assert conn.status == status
+
+    case conn.resp_body do
+      "" -> nil
+      body -> Jason.decode!(body)
+    end
+  end
+
+  def assert_data_envelope(body) do
+    assert %{"data" => data} = body
+    data
+  end
+
+  def assert_list_envelope(body) do
+    assert %{"data" => data, "meta" => meta} = body
+    assert is_list(data)
+    assert %{"page" => page, "page_size" => page_size, "total" => total} = meta
+    assert is_integer(page)
+    assert is_integer(page_size)
+    assert is_integer(total)
+    data
+  end
+
+  def assert_validation_error(body, field) do
+    assert %{"errors" => %{"detail" => "Validation failed", "fields" => fields}} = body
+    assert Map.has_key?(fields, field)
+  end
+
+  def uuid, do: "018fb8f6-4673-7a9f-bb64-8e4f28d57921"
+
+  def login_input do
+    %{
+      "usp_username" => "1234567",
+      "envelope" => %{
+        "key_id" => "k1",
+        "enc" => "base64enc",
+        "ciphertext" => "base64ciphertext",
+        "encrypted_at" => "2026-07-08T12:00:00Z"
+      }
+    }
+  end
+
+  def credential_blob, do: "test-credential-blob"
+
+  def sync_input do
+    %{
+      "credential_blob" => credential_blob(),
+      "sources" => ["schedule", "grades"]
+    }
+  end
+
+  def semester_input do
+    %{
+      "name" => "2026.2",
+      "starts_on" => "2026-08-01",
+      "ends_on" => "2026-12-20",
+      "active" => true
+    }
+  end
+
+  def enrollment_input do
+    %{
+      "semester_id" => uuid(),
+      "discipline_id" => uuid(),
+      "name" => "MAC0110 Introducao a Computacao",
+      "professor" => "Profa. Ana",
+      "source" => "manual"
+    }
+  end
+
+  def meeting_input do
+    %{
+      "day_of_week" => 2,
+      "starts_at" => "08:00",
+      "ends_at" => "10:00",
+      "location" => "IME B-12"
+    }
+  end
+
+  def task_input do
+    %{
+      "enrollment_id" => uuid(),
+      "title" => "Lista 1",
+      "kind" => "assignment",
+      "status" => "todo",
+      "priority" => "normal",
+      "due_at" => "2026-08-20T23:59:00Z"
+    }
+  end
+
+  def grade_input do
+    %{
+      "enrollment_id" => uuid(),
+      "title" => "P1",
+      "score" => 8.5,
+      "max_score" => 10.0,
+      "weight" => 1.0,
+      "date" => "2026-09-10"
+    }
+  end
+
+  def absence_input do
+    %{
+      "enrollment_id" => uuid(),
+      "date" => "2026-09-12",
+      "count" => 2,
+      "reason" => "medical"
+    }
+  end
+end
