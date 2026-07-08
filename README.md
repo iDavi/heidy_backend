@@ -24,14 +24,14 @@ Built with **Elixir** and **Phoenix** as a JSON API.
 
 ## Design
 
-The API design lives in [`docs/`](docs/):
+The API design lives in [`slop/`](slop/):
 
-- [`docs/architecture.md`](docs/architecture.md) — bounded contexts, domain
+- [`slop/architecture.md`](slop/architecture.md) — bounded contexts, domain
   model, the three-key credential envelope (no credentials at rest), and
   cross-cutting conventions.
-- [`docs/api.md`](docs/api.md) — the full endpoint reference: request/response
+- [`slop/api.md`](slop/api.md) — the full endpoint reference: request/response
   formats, per-field input constraints, and status codes.
-- [`docs/openapi.json`](docs/openapi.json) — the authoritative machine-readable
+- [`slop/openapi.json`](slop/openapi.json) — the authoritative machine-readable
   **OpenAPI 3.1** contract (JSON Schema for every input/output and constraint).
 
 ## Project layout
