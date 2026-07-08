@@ -1,0 +1,15 @@
+import Config
+
+config :phoenix, :json_library, Jason
+
+config :heidy_api, HeidyApiWeb.Endpoint,
+  url: [host: "localhost"],
+  adapter: Phoenix.Endpoint.Cowboy2Adapter,
+  render_errors: [formats: [json: HeidyApiWeb.ErrorJSON], layout: false]
+
+config :heidy_api,
+  usp_client: HeidyApi.Usp.Client.Jupiter,
+  vault: HeidyApi.Credentials.Vault.Local,
+  sync_async: true
+
+import_config "#{config_env()}.exs"
