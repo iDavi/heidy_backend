@@ -30,6 +30,50 @@ defmodule HeidyApiWeb.UserContractTest do
       assert %{"name" => ^expected_name} = user
     end
 
+    test "updating a profile with an empty body reports that at least one field is required" do
+      # Arrange
+      changes = %{}
+
+      # Act
+      response = patch(auth_conn(), api_path("/me"), Jason.encode!(changes))
+
+      # Assert
+      response
+      |> json_response(422)
+      |> assert_validation_error("profile")
+    end
+
+    test "updating a profile validates name length, email format, and course id format" do
+      # Arrange
+      changes = %{
+        "name" => too_long(80),
+        "email" => "not-an-email",
+        "course_id" => invalid_uuid()
+      }
+
+      # Act
+      response = patch(auth_conn(), api_path("/me"), Jason.encode!(changes))
+
+      # Assert
+      body = json_response(response, 422)
+      assert_validation_error(body, "name")
+      assert_validation_error(body, "email")
+      assert_validation_error(body, "course_id")
+    end
+
+    test "reading a profile without a bearer token returns unauthorized" do
+      # Arrange
+      expected_status = 401
+
+      # Act
+      response = get(api_conn(), api_path("/me"))
+
+      # Assert
+      response
+      |> json_response(expected_status)
+      |> assert_error_detail()
+    end
+
     test "a student can revoke every stored credential blob" do
       # Arrange
       expected_status = 204
@@ -50,6 +94,19 @@ defmodule HeidyApiWeb.UserContractTest do
 
       # Assert
       assert json_response(response, expected_status) == nil
+    end
+
+    test "deleting an account without a bearer token returns unauthorized" do
+      # Arrange
+      expected_status = 401
+
+      # Act
+      response = delete(api_conn(), api_path("/me"))
+
+      # Assert
+      response
+      |> json_response(expected_status)
+      |> assert_error_detail()
     end
   end
 end

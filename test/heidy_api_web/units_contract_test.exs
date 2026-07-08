@@ -15,5 +15,18 @@ defmodule HeidyApiWeb.UnitsContractTest do
       |> json_response(200)
       |> assert_list_envelope()
     end
+
+    test "listing courses validates pagination and unit id" do
+      # Arrange
+      unit_id = invalid_uuid()
+
+      # Act
+      response = get(auth_conn(), api_path("/units/#{unit_id}/courses?page=0&page_size=101"))
+
+      # Assert
+      response
+      |> json_response(404)
+      |> assert_error_detail()
+    end
   end
 end

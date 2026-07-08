@@ -65,6 +65,80 @@ defmodule HeidyApiWeb.AuthContractTest do
       |> assert_validation_error(expected_invalid_field)
     end
 
+    test "logging in with a non-USP-number username reports a validation error" do
+      # Arrange
+      invalid_credentials = login_input() |> Map.put("usp_username", "abc123")
+      expected_invalid_field = "usp_username"
+
+      # Act
+      response = post(api_conn(), api_path("/auth/login"), Jason.encode!(invalid_credentials))
+
+      # Assert
+      response
+      |> json_response(422)
+      |> assert_validation_error(expected_invalid_field)
+    end
+
+    test "logging in with missing envelope fields reports each missing field" do
+      # Arrange
+      invalid_credentials = %{"usp_username" => "1234567", "envelope" => %{}}
+
+      # Act
+      response = post(api_conn(), api_path("/auth/login"), Jason.encode!(invalid_credentials))
+
+      # Assert
+      body = json_response(response, 422)
+      assert_validation_error(body, "envelope.key_id")
+      assert_validation_error(body, "envelope.enc")
+      assert_validation_error(body, "envelope.ciphertext")
+      assert_validation_error(body, "envelope.encrypted_at")
+    end
+
+    test "logging in with envelope values over their limits reports validation errors" do
+      # Arrange
+      invalid_credentials =
+        login_input()
+        |> put_in(["envelope", "key_id"], too_long(32))
+        |> put_in(["envelope", "enc"], too_long(128))
+        |> put_in(["envelope", "ciphertext"], too_long(512))
+
+      # Act
+      response = post(api_conn(), api_path("/auth/login"), Jason.encode!(invalid_credentials))
+
+      # Assert
+      body = json_response(response, 422)
+      assert_validation_error(body, "envelope.key_id")
+      assert_validation_error(body, "envelope.enc")
+      assert_validation_error(body, "envelope.ciphertext")
+    end
+
+    test "logging in with an invalid encrypted_at timestamp reports a validation error" do
+      # Arrange
+      invalid_credentials = put_in(login_input(), ["envelope", "encrypted_at"], "not-a-date-time")
+      expected_invalid_field = "envelope.encrypted_at"
+
+      # Act
+      response = post(api_conn(), api_path("/auth/login"), Jason.encode!(invalid_credentials))
+
+      # Assert
+      response
+      |> json_response(422)
+      |> assert_validation_error(expected_invalid_field)
+    end
+
+    test "logging in with rejected USP credentials returns unauthorized" do
+      # Arrange
+      rejected_credentials = login_input() |> Map.put("usp_username", "000000")
+
+      # Act
+      response = post(api_conn(), api_path("/auth/login"), Jason.encode!(rejected_credentials))
+
+      # Assert
+      response
+      |> json_response(401)
+      |> assert_error_detail()
+    end
+
     test "a logged-in student can log out and revoke the current token" do
       # Arrange
       expected_status = 204
@@ -74,6 +148,19 @@ defmodule HeidyApiWeb.AuthContractTest do
 
       # Assert
       assert json_response(response, expected_status) == nil
+    end
+
+    test "logging out without a bearer token returns unauthorized" do
+      # Arrange
+      expected_status = 401
+
+      # Act
+      response = delete(api_conn(), api_path("/auth/logout"))
+
+      # Assert
+      response
+      |> json_response(expected_status)
+      |> assert_error_detail()
     end
   end
 end

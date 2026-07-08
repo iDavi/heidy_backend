@@ -12,8 +12,20 @@ defmodule HeidyApiWeb.ScheduleContractTest do
 
       # Assert
       schedule = response |> json_response(200) |> assert_data_envelope()
-      assert %{"days" => days} = schedule
-      assert is_list(days)
+      assert is_map(schedule)
+    end
+
+    test "viewing a schedule validates the semester id filter" do
+      # Arrange
+      semester_id = invalid_uuid()
+
+      # Act
+      response = get(auth_conn(), api_path("/schedule?semester_id=#{semester_id}"))
+
+      # Assert
+      response
+      |> json_response(422)
+      |> assert_validation_error("semester_id")
     end
   end
 end

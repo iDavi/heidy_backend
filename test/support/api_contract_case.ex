@@ -65,14 +65,34 @@ defmodule HeidyApi.ApiContractCase do
     data
   end
 
+  @doc "Unwraps a non-paginated collection envelope: `%{\"data\" => [...]}`."
+  def assert_collection_envelope(body) do
+    assert %{"data" => data} = body
+    assert is_list(data)
+    data
+  end
+
   @doc "Asserts a validation-error envelope that mentions the given field."
   def assert_validation_error(body, field) do
     assert %{"errors" => %{"detail" => "Validation failed", "fields" => fields}} = body
     assert Map.has_key?(fields, field)
   end
 
+  @doc "Asserts a non-validation error envelope with a detail message."
+  def assert_error_detail(body) do
+    assert %{"errors" => %{"detail" => detail}} = body
+    assert is_binary(detail)
+    detail
+  end
+
   @doc "A stable example UUID for path parameters."
   def uuid, do: "018fb8f6-4673-7a9f-bb64-8e4f28d57921"
+
+  @doc "A path/query value that must fail UUID validation."
+  def invalid_uuid, do: "not-a-uuid"
+
+  @doc "Builds a string one character beyond a max-length constraint."
+  def too_long(max), do: String.duplicate("x", max + 1)
 
   def login_input do
     %{
@@ -97,9 +117,9 @@ defmodule HeidyApi.ApiContractCase do
 
   def semester_input do
     %{
-      "name" => "2026.2",
-      "starts_on" => "2026-08-01",
-      "ends_on" => "2026-12-20",
+      "label" => "2026.2",
+      "start_date" => "2026-08-01",
+      "end_date" => "2026-12-20",
       "active" => true
     }
   end
@@ -108,9 +128,11 @@ defmodule HeidyApi.ApiContractCase do
     %{
       "semester_id" => uuid(),
       "discipline_id" => uuid(),
-      "name" => "MAC0110 Introducao a Computacao",
+      "title" => "MAC0110 Introducao a Computacao",
       "professor" => "Profa. Ana",
-      "source" => "manual"
+      "credits" => 4,
+      "color" => "#2F80ED",
+      "absence_limit" => 20
     }
   end
 
@@ -136,21 +158,18 @@ defmodule HeidyApi.ApiContractCase do
 
   def grade_input do
     %{
-      "enrollment_id" => uuid(),
-      "title" => "P1",
+      "label" => "P1",
       "score" => 8.5,
       "max_score" => 10.0,
-      "weight" => 1.0,
-      "date" => "2026-09-10"
+      "weight" => 1.0
     }
   end
 
   def absence_input do
     %{
-      "enrollment_id" => uuid(),
       "date" => "2026-09-12",
       "count" => 2,
-      "reason" => "medical"
+      "note" => "medical"
     }
   end
 end

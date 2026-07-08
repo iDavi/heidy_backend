@@ -22,6 +22,44 @@ defmodule HeidyApiWeb.AbsencesContractTest do
       assert expected == Map.take(absence, ["date", "count"])
     end
 
+    test "logging an absence validates date, count, and note length" do
+      # Arrange
+      enrollment_id = uuid()
+      attributes = %{"date" => "not-a-date", "count" => 11, "note" => too_long(200)}
+
+      # Act
+      response =
+        post(
+          auth_conn(),
+          api_path("/enrollments/#{enrollment_id}/absences"),
+          Jason.encode!(attributes)
+        )
+
+      # Assert
+      body = json_response(response, 422)
+      assert_validation_error(body, "date")
+      assert_validation_error(body, "count")
+      assert_validation_error(body, "note")
+    end
+
+    test "logging an absence for an unknown class returns not found" do
+      # Arrange
+      enrollment_id = "00000000-0000-4000-8000-000000000000"
+
+      # Act
+      response =
+        post(
+          auth_conn(),
+          api_path("/enrollments/#{enrollment_id}/absences"),
+          Jason.encode!(absence_input())
+        )
+
+      # Assert
+      response
+      |> json_response(404)
+      |> assert_error_detail()
+    end
+
     test "a student can list the absences of a class" do
       # Arrange
       enrollment_id = uuid()
@@ -32,7 +70,20 @@ defmodule HeidyApiWeb.AbsencesContractTest do
       # Assert
       response
       |> json_response(200)
-      |> assert_list_envelope()
+      |> assert_collection_envelope()
+    end
+
+    test "listing absences for a malformed class id returns not found" do
+      # Arrange
+      enrollment_id = invalid_uuid()
+
+      # Act
+      response = get(auth_conn(), api_path("/enrollments/#{enrollment_id}/absences"))
+
+      # Assert
+      response
+      |> json_response(404)
+      |> assert_error_detail()
     end
 
     test "a student can see a computed attendance summary for a class" do
@@ -44,9 +95,23 @@ defmodule HeidyApiWeb.AbsencesContractTest do
 
       # Assert
       summary = response |> json_response(200) |> assert_data_envelope()
-      assert %{"absence_count" => absence_count, "absence_limit" => absence_limit} = summary
-      assert is_integer(absence_count)
-      assert is_integer(absence_limit)
+      assert %{"used" => used, "remaining" => remaining, "status" => status} = summary
+      assert is_integer(used)
+      assert is_nil(remaining) or is_integer(remaining)
+      assert status in ["ok", "warning", "exceeded"]
+    end
+
+    test "reading attendance summary for a malformed class id returns not found" do
+      # Arrange
+      enrollment_id = invalid_uuid()
+
+      # Act
+      response = get(auth_conn(), api_path("/enrollments/#{enrollment_id}/absences/summary"))
+
+      # Assert
+      response
+      |> json_response(404)
+      |> assert_error_detail()
     end
 
     test "a student can remove an absence" do
