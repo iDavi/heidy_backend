@@ -35,6 +35,7 @@ defmodule HeidyApi.MixProject do
   defp deps do
     [
       {:ecto_sql, "~> 3.13"},
+      {:floki, "~> 0.37"},
       {:jason, "~> 1.4"},
       {:phoenix, "~> 1.7.21"},
       {:postgrex, "~> 0.20"},

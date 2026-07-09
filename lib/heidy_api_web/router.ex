@@ -39,6 +39,10 @@ defmodule HeidyApiWeb.Router do
 
       get "/schedule", ScheduleController, :show
 
+      post "/moodle/courses", MoodleController, :courses
+      post "/moodle/courses/:id", MoodleController, :course
+      post "/moodle/activity", MoodleController, :activity
+
       resources "/semesters", SemesterController, except: [:new, :edit]
 
       resources "/enrollments", EnrollmentController, except: [:new, :edit] do

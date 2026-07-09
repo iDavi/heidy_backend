@@ -28,3 +28,50 @@ defmodule HeidyApi.Moodle.Assignment do
           kind: kind()
         }
 end
+
+defmodule HeidyApi.Moodle.Course do
+  @moduledoc "A course visible to the student in e-Disciplinas."
+
+  @enforce_keys [:id, :title, :url]
+  defstruct [:id, :title, :url]
+
+  @type t :: %__MODULE__{id: pos_integer(), title: String.t(), url: String.t()}
+end
+
+defmodule HeidyApi.Moodle.Activity do
+  @moduledoc "A read-only item published inside an e-Disciplinas course."
+
+  @enforce_keys [:id, :title, :kind, :url]
+  defstruct [:id, :title, :kind, :url]
+
+  @type t :: %__MODULE__{
+          id: pos_integer(),
+          title: String.t(),
+          kind: String.t(),
+          url: String.t()
+        }
+end
+
+defmodule HeidyApi.Moodle.CourseDetail do
+  @moduledoc "A Moodle course and its published activities."
+
+  @enforce_keys [:id, :title, :activities]
+  defstruct [:id, :title, :activities]
+
+  @type t :: %__MODULE__{id: pos_integer(), title: String.t(), activities: [Activity.t()]}
+end
+
+defmodule HeidyApi.Moodle.ActivityDetail do
+  @moduledoc "Text content for a Moodle activity, read without write capabilities."
+
+  @enforce_keys [:id, :title, :content]
+  defstruct [:id, :title, :content, :links, :file]
+
+  @type t :: %__MODULE__{
+          id: pos_integer(),
+          title: String.t(),
+          content: String.t(),
+          links: [%{label: String.t(), url: String.t()}],
+          file: %{name: String.t(), mime: String.t(), data: String.t()} | nil
+        }
+end

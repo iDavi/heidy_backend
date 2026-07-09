@@ -3,7 +3,7 @@ defmodule HeidyApi.MoodleClientStub do
 
   @behaviour HeidyApi.Moodle.Client
 
-  alias HeidyApi.Moodle.{Assignment, Session}
+  alias HeidyApi.Moodle.{Activity, ActivityDetail, Assignment, Course, CourseDetail, Session}
 
   @impl true
   def login("000000", _password), do: {:error, :invalid_credentials}
@@ -22,4 +22,49 @@ defmodule HeidyApi.MoodleClientStub do
        }
      ]}
   end
+
+  @impl true
+  def fetch_courses(%Session{}) do
+    {:ok,
+     [
+       %Course{
+         id: 101,
+         title: "ACH2016 Inteligencia Artificial",
+         url: "https://edisciplinas.usp.br/course/view.php?id=101"
+       }
+     ]}
+  end
+
+  @impl true
+  def fetch_course(%Session{}, 101) do
+    {:ok,
+     %CourseDetail{
+       id: 101,
+       title: "ACH2016 Inteligencia Artificial",
+       activities: [
+         %Activity{
+           id: 9001,
+           title: "Lista Moodle",
+           kind: "Tarefa",
+           url: "https://edisciplinas.usp.br/mod/assign/view.php?id=9001"
+         }
+       ]
+     }}
+  end
+
+  def fetch_course(%Session{}, _course_id), do: {:error, :unavailable}
+
+  @impl true
+  def fetch_activity(%Session{}, "https://edisciplinas.usp.br/mod/assign/view.php?id=9001") do
+    {:ok,
+     %ActivityDetail{
+       id: 9001,
+       title: "Lista Moodle",
+       content: "Leia o enunciado e entregue a atividade.",
+       links: [],
+       file: nil
+     }}
+  end
+
+  def fetch_activity(%Session{}, _url), do: {:error, :unavailable}
 end

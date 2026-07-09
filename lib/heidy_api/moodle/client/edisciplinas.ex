@@ -2,31 +2,31 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
   @moduledoc """
   e-Disciplinas client using USP's SAML single-sign-on flow.
 
-  Moodle exposes its own authenticated calendar endpoint. The client performs
-  the browser flow in memory, calls that endpoint, and keeps no credential or
-  cookie after the sync process ends.
+  The client performs the browser flow in memory, reads Moodle's authenticated
+  course and activity pages, and keeps no credential or cookie after the
+  request ends.
   """
 
   @behaviour HeidyApi.Moodle.Client
 
-  alias HeidyApi.Moodle.{Assignment, Session}
+  alias HeidyApi.Moodle.{Activity, ActivityDetail, Assignment, Course, CourseDetail, Session}
 
   @moodle_url "https://edisciplinas.usp.br"
   @login_url @moodle_url <> "/auth/shibboleth"
-  @calendar_url @moodle_url <> "/lib/ajax/service.php"
   @max_redirects 8
+  @max_inline_file_size 10_000_000
 
   @impl true
   def login(username, password) do
     with {:ok, response, session} <- request(%Session{username: username}, :get, @login_url, []),
-         {:ok, idp_url} <- location(response),
-         {:ok, idp_page, session} <- request(session, :get, idp_url, []),
+         {:ok, idp_url} <- location(response, @login_url),
+         {:ok, idp_page, session} <- follow_redirects(session, idp_url),
          {:ok, form_url} <- form_action(idp_page.body, idp_url),
          {:ok, response, session} <-
            request(session, :post, form_url,
              form: [j_username: username, j_password: password, _eventId_proceed: "Login"]
            ),
-         {:ok, session} <- complete_saml(session, response, 0),
+         {:ok, session} <- complete_saml(session, response, form_url, 0),
          {:ok, dashboard, session} <- request(session, :get, @moodle_url <> "/my/", []),
          true <- authenticated?(dashboard) do
       {:ok, session}
@@ -39,48 +39,125 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
 
   @impl true
   def fetch_assignments(%Session{} = session) do
-    with {:ok, dashboard, session} <- request(session, :get, @moodle_url <> "/my/", []),
-         {:ok, sesskey} <- sesskey(dashboard.body),
-         {:ok, response, _session} <-
-           request(
-             session,
-             :post,
-             @calendar_url <>
-               "?sesskey=#{URI.encode_www_form(sesskey)}&info=core_calendar_get_calendar_events",
-             headers: [{"content-type", "application/json"}],
-             body: Jason.encode!(calendar_request())
-           ),
-         {:ok, payload} <- Jason.decode(response.body) do
-      {:ok, assignments_from_payload(payload)}
+    with {:ok, courses} <- fetch_courses(session) do
+      assignments =
+        courses
+        |> Enum.flat_map(fn course ->
+          case fetch_course(session, course.id) do
+            {:ok, detail} -> assignments_from_course(course, detail)
+            {:error, _reason} -> []
+          end
+        end)
+
+      {:ok, assignments}
     else
       _failure -> {:error, :unavailable}
     end
   end
 
-  @doc false
-  @spec assignments_from_payload(term()) :: [Assignment.t()]
-  def assignments_from_payload([%{"error" => false, "data" => %{"events" => events}} | _])
-      when is_list(events) do
-    events
-    |> Enum.map(&assignment_from_event/1)
-    |> Enum.reject(&is_nil/1)
+  @impl true
+  def fetch_courses(%Session{} = session) do
+    with {:ok, response, _session} <- request(session, :get, @moodle_url <> "/", []) do
+      {:ok, courses_from_html(response.body)}
+    else
+      _failure -> {:error, :unavailable}
+    end
   end
 
-  def assignments_from_payload(_payload), do: []
+  @impl true
+  def fetch_course(%Session{} = session, course_id)
+      when is_integer(course_id) and course_id > 0 do
+    with {:ok, response, _session} <-
+           request(session, :get, @moodle_url <> "/course/view.php?id=#{course_id}", []) do
+      course_from_html(response.body, course_id)
+    end
+  end
 
-  defp complete_saml(session, response, redirects) when redirects < @max_redirects do
+  def fetch_course(%Session{}, _course_id), do: {:error, :unavailable}
+
+  @impl true
+  def fetch_activity(%Session{} = session, activity_url) do
+    with {:ok, activity_id} <- valid_activity_url(activity_url),
+         {:ok, response, _session} <- follow_redirects(session, activity_url) do
+      if html_response?(response) do
+        activity_from_html(response.body, activity_id)
+      else
+        file_from_response(response, activity_id)
+      end
+    end
+  end
+
+  defp follow_redirects(session, url, redirects \\ 0)
+
+  defp follow_redirects(session, url, redirects) when redirects < @max_redirects do
+    with {:ok, response, session} <- request(session, :get, url, []) do
+      if response.status in 300..399 do
+        with {:ok, redirect_url} <- location(response, url) do
+          follow_redirects(session, redirect_url, redirects + 1)
+        end
+      else
+        {:ok, response, session}
+      end
+    end
+  end
+
+  defp follow_redirects(_session, _url, _redirects), do: {:error, :unavailable}
+
+  defp html_response?(response) do
+    response
+    |> Req.Response.get_header("content-type")
+    |> Enum.any?(&String.contains?(&1, "text/html"))
+  end
+
+  defp file_from_response(%{body: body} = response, activity_id)
+       when is_binary(body) and byte_size(body) <= @max_inline_file_size do
+    mime =
+      response |> Req.Response.get_header("content-type") |> List.first() ||
+        "application/octet-stream"
+
+    name = filename(response) || "Arquivo"
+
+    {:ok,
+     %ActivityDetail{
+       id: activity_id,
+       title: name,
+       content: "",
+       links: [],
+       file: %{name: name, mime: mime, data: Base.encode64(body)}
+     }}
+  end
+
+  defp file_from_response(_response, _activity_id), do: {:error, :unavailable}
+
+  defp filename(response) do
+    response
+    |> Req.Response.get_header("content-disposition")
+    |> List.first()
+    |> case do
+      nil ->
+        nil
+
+      header ->
+        case Regex.run(~r/filename\*?=(?:UTF-8''|\")?([^\";]+)/i, header) do
+          [_, name] -> URI.decode(name)
+          _none -> nil
+        end
+    end
+  end
+
+  defp complete_saml(session, response, base_url, redirects) when redirects < @max_redirects do
     cond do
       response.status in 300..399 ->
-        with {:ok, redirect_url} <- location(response),
+        with {:ok, redirect_url} <- location(response, base_url),
              {:ok, response, session} <- request(session, :get, redirect_url, []) do
-          complete_saml(session, response, redirects + 1)
+          complete_saml(session, response, redirect_url, redirects + 1)
         end
 
-      saml_form = saml_form(response.body) ->
+      saml_form = saml_form(response.body, base_url) ->
         {url, fields} = saml_form
 
         with {:ok, response, session} <- request(session, :post, url, form: fields) do
-          complete_saml(session, response, redirects + 1)
+          complete_saml(session, response, url, redirects + 1)
         end
 
       true ->
@@ -88,71 +165,193 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
     end
   end
 
-  defp complete_saml(_session, _response, _redirects), do: {:error, :unavailable}
+  defp complete_saml(_session, _response, _base_url, _redirects), do: {:error, :unavailable}
 
-  defp calendar_request do
-    now = DateTime.utc_now() |> DateTime.to_unix()
-    in_six_months = DateTime.add(DateTime.utc_now(), 183, :day) |> DateTime.to_unix()
-
-    [
-      %{
-        index: 0,
-        methodname: "core_calendar_get_calendar_events",
-        args: %{
-          events: %{eventids: [], courseids: [], groupids: [], userids: []},
-          options: %{
-            userevents: true,
-            siteevents: false,
-            timestart: now,
-            timeend: in_six_months,
-            ignorehidden: true
-          }
-        }
+  defp assignments_from_course(course, detail) do
+    detail.activities
+    |> Enum.filter(&(&1.kind in ["Tarefa", "Questionario"]))
+    |> Enum.map(fn activity ->
+      %Assignment{
+        external_ref: "moodle:activity:#{activity.id}",
+        title: activity.title,
+        course_name: course.title,
+        url: activity.url,
+        kind: if(activity.kind == "Questionario", do: "exam", else: "assignment")
       }
-    ]
+    end)
   end
 
-  defp assignment_from_event(%{"id" => id, "name" => title} = event)
-       when is_integer(id) and is_binary(title) do
-    %Assignment{
-      external_ref: "moodle:event:#{id}",
-      title: title,
-      course_name: course_name(event),
-      due_at: event_time(event),
-      url: Map.get(event, "url"),
-      kind: event_kind(event)
-    }
-  end
-
-  defp assignment_from_event(_event), do: nil
-
-  defp course_name(%{"course" => %{"fullname" => name}}) when is_binary(name), do: name
-  defp course_name(%{"coursefullname" => name}) when is_binary(name), do: name
-  defp course_name(_event), do: nil
-
-  defp event_time(event) do
-    timestamp = Map.get(event, "timesort") || Map.get(event, "timestart")
-
-    if is_integer(timestamp) and timestamp > 0 do
-      DateTime.from_unix!(timestamp)
+  @doc false
+  @spec courses_from_html(String.t()) :: [Course.t()]
+  def courses_from_html(html) do
+    with {:ok, document} <- Floki.parse_document(html) do
+      courses_from_document(document)
+    else
+      _invalid -> []
     end
-  rescue
-    ArgumentError -> nil
   end
 
-  defp event_kind(event) do
-    event
-    |> Map.get("modulename", Map.get(event, "activityname", ""))
-    |> to_string()
-    |> String.downcase()
+  @doc false
+  @spec course_from_html(String.t(), pos_integer()) ::
+          {:ok, CourseDetail.t()} | {:error, :unavailable}
+  def course_from_html(html, course_id) do
+    with {:ok, document} <- Floki.parse_document(html),
+         title when is_binary(title) and title != "" <- title_from(document) do
+      {:ok,
+       %CourseDetail{
+         id: course_id,
+         title: title,
+         activities: activities_from_document(document)
+       }}
+    else
+      _invalid -> {:error, :unavailable}
+    end
+  end
+
+  @doc false
+  @spec activity_from_html(String.t(), pos_integer()) ::
+          {:ok, ActivityDetail.t()} | {:error, :unavailable}
+  def activity_from_html(html, activity_id) do
+    with {:ok, document} <- Floki.parse_document(html),
+         title when is_binary(title) and title != "" <- title_from(document) do
+      {:ok,
+       %ActivityDetail{
+         id: activity_id,
+         title: title,
+         content: content_from_document(document),
+         links: links_from_document(document),
+         file: nil
+       }}
+    else
+      _invalid -> {:error, :unavailable}
+    end
+  end
+
+  defp courses_from_document(document) do
+    course_links =
+      document
+      |> Floki.find("#unidades h5 a[href*='course/view.php?id=']")
+      |> case do
+        [] -> Floki.find(document, "h5 a[href*='course/view.php?id=']")
+        links -> links
+      end
+
+    course_links
+    |> Enum.flat_map(fn link ->
+      with url when is_binary(url) <- link |> Floki.attribute("href") |> List.first(),
+           {:ok, id} <- course_id(url),
+           title when title != "" <- clean_text(link) do
+        [%Course{id: id, title: title, url: absolute_url(url, @moodle_url)}]
+      else
+        _invalid -> []
+      end
+    end)
+    |> Enum.uniq_by(& &1.id)
+  end
+
+  defp activities_from_document(document) do
+    document
+    |> Floki.find("a[href*='/mod/']")
+    |> Enum.flat_map(fn link ->
+      with url when is_binary(url) <- link |> Floki.attribute("href") |> List.first(),
+           absolute_url <- absolute_url(url, @moodle_url),
+           {:ok, id} <- valid_activity_url(absolute_url),
+           title when title != "" <- clean_text(link) do
+        [%Activity{id: id, title: title, kind: activity_kind(absolute_url), url: absolute_url}]
+      else
+        _invalid -> []
+      end
+    end)
+    |> Enum.uniq_by(& &1.id)
+  end
+
+  defp content_from_document(document) do
+    document
+    |> Floki.find("main")
+    |> List.first()
+    |> clean_text()
+    |> String.slice(0, 50_000)
+  end
+
+  defp links_from_document(document) do
+    document
+    |> Floki.find("main a[href]")
+    |> Enum.flat_map(fn link ->
+      with url when is_binary(url) <- link |> Floki.attribute("href") |> List.first(),
+           label when label != "" <- clean_text(link) do
+        [%{label: label, url: absolute_url(url, @moodle_url)}]
+      else
+        _invalid -> []
+      end
+    end)
+    |> Enum.uniq_by(& &1.url)
+    |> Enum.take(100)
+  end
+
+  defp title_from(document) do
+    document
+    |> Floki.find("h1")
+    |> List.first()
+    |> clean_text()
+  end
+
+  defp clean_text(nil), do: ""
+
+  defp clean_text(node) do
+    node
+    |> Floki.text(sep: " ")
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+  end
+
+  defp course_id(url) do
+    query = URI.parse(url).query || ""
+
+    query
+    |> URI.decode_query()
+    |> Map.get("id")
+    |> parse_positive_integer()
+  end
+
+  defp valid_activity_url(url) do
+    uri = URI.parse(url)
+
+    cond do
+      uri.host not in [nil, "edisciplinas.usp.br"] ->
+        {:error, :unavailable}
+
+      not String.starts_with?(uri.path || "", "/mod/") ->
+        {:error, :unavailable}
+
+      true ->
+        (uri.query || "") |> URI.decode_query() |> Map.get("id") |> parse_positive_integer()
+    end
+  end
+
+  defp parse_positive_integer(nil), do: {:error, :unavailable}
+
+  defp parse_positive_integer(value) do
+    case Integer.parse(value) do
+      {id, ""} when id > 0 -> {:ok, id}
+      _invalid -> {:error, :unavailable}
+    end
+  end
+
+  defp activity_kind(url) do
+    url
+    |> URI.parse()
+    |> Map.get(:path, "")
+    |> String.split("/", trim: true)
+    |> Enum.at(1)
     |> case do
-      "assign" -> "assignment"
-      "assignment" -> "assignment"
-      "quiz" -> "exam"
-      "workshop" -> "project"
-      "book" -> "reading"
-      "page" -> "reading"
-      _other -> "other"
+      "assign" -> "Tarefa"
+      "quiz" -> "Questionario"
+      "resource" -> "Arquivo"
+      "folder" -> "Pasta"
+      "forum" -> "Forum"
+      "page" -> "Pagina"
+      "url" -> "Link"
+      _other -> "Atividade"
     end
   end
 
@@ -162,13 +361,6 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
 
   defp authenticated?(_response), do: false
 
-  defp sesskey(body) do
-    case Regex.run(~r/["']sesskey["']\s*[:=]\s*["']([^"']+)/, body) do
-      [_, key] -> {:ok, html_unescape(key)}
-      _none -> {:error, :unavailable}
-    end
-  end
-
   defp form_action(body, base_url) do
     case Regex.run(~r/<form\b[^>]*\baction=["']([^"']+)/i, body) do
       [_, action] -> {:ok, absolute_url(html_unescape(action), base_url)}
@@ -176,8 +368,8 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
     end
   end
 
-  defp saml_form(body) when is_binary(body) do
-    with {:ok, url} <- form_action(body, @moodle_url),
+  defp saml_form(body, base_url) when is_binary(body) do
+    with {:ok, url} <- form_action(body, base_url),
          true <- String.contains?(body, "SAMLResponse"),
          fields when fields != [] <- hidden_fields(body) do
       {url, fields}
@@ -186,7 +378,7 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
     end
   end
 
-  defp saml_form(_body), do: nil
+  defp saml_form(_body, _base_url), do: nil
 
   defp hidden_fields(body) do
     Regex.scan(~r/<input\b(?=[^>]*\btype=["']hidden["'])[^>]*>/i, body)
@@ -200,9 +392,9 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
     end)
   end
 
-  defp location(response) do
+  defp location(response, base_url) do
     case Req.Response.get_header(response, "location") do
-      [location | _] -> {:ok, html_unescape(location)}
+      [location | _] -> {:ok, location |> html_unescape() |> absolute_url(base_url)}
       _none -> {:error, :unavailable}
     end
   end
@@ -283,9 +475,19 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
 
   defp html_unescape(value) do
     value
+    |> decode_numeric_entities(~r/&#x([0-9a-fA-F]+);/, 16)
+    |> decode_numeric_entities(~r/&#(\d+);/, 10)
     |> String.replace("&amp;", "&")
     |> String.replace("&quot;", "\"")
     |> String.replace("&#039;", "'")
     |> String.replace("&#x2F;", "/")
   end
+
+  defp decode_numeric_entities(value, pattern, base) do
+    Regex.replace(pattern, value, fn _entity, code ->
+      code |> String.to_integer(base) |> codepoint_to_utf8()
+    end)
+  end
+
+  defp codepoint_to_utf8(codepoint), do: <<codepoint::utf8>>
 end

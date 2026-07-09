@@ -7,6 +7,8 @@ defmodule HeidyApiWeb.Serializer do
   alias HeidyApi.Accounts.User
   alias HeidyApi.Catalog.{Course, Discipline, Unit, University}
   alias HeidyApi.Credentials.{Blob, LoginKey}
+  alias HeidyApi.Moodle.{Activity, ActivityDetail, CourseDetail}
+  alias HeidyApi.Moodle.Course, as: MoodleCourse
   alias HeidyApi.Planner.{Absence, AttendanceSummary, Enrollment, Grade, GradeSummary}
   alias HeidyApi.Planner.{Meeting, Semester, Task}
   alias HeidyApi.Usp.SyncRun
@@ -108,6 +110,19 @@ defmodule HeidyApiWeb.Serializer do
 
   def render(%LoginKey{} = key), do: Map.take(key, [:key_id, :alg, :public_key])
   def render(%Blob{} = blob), do: Map.take(blob, [:blob, :expires_at])
+
+  def render(%MoodleCourse{} = course), do: Map.take(course, [:id, :title, :url])
+
+  def render(%Activity{} = activity), do: Map.take(activity, [:id, :title, :kind, :url])
+
+  def render(%CourseDetail{} = course) do
+    course
+    |> Map.take([:id, :title])
+    |> Map.put(:activities, render(course.activities))
+  end
+
+  def render(%ActivityDetail{} = activity),
+    do: Map.take(activity, [:id, :title, :content, :links, :file])
 
   # The computed weekly schedule: a plain map of day -> slots.
   def render(%{days: days} = schedule) when not is_struct(schedule) do

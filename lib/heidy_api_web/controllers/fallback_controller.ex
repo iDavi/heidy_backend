@@ -32,6 +32,10 @@ defmodule HeidyApiWeb.FallbackController do
     error(conn, :service_unavailable, "USP is unreachable right now — try again later")
   end
 
+  def call(conn, {:error, :moodle_unavailable}) do
+    error(conn, :service_unavailable, "Moodle is unreachable right now — try again later")
+  end
+
   defp error(conn, status, detail) do
     conn |> put_status(status) |> json(%{errors: %{detail: detail}})
   end

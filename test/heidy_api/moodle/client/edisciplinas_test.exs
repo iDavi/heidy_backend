@@ -3,36 +3,35 @@ defmodule HeidyApi.Moodle.Client.EdiciplinasTest do
 
   alias HeidyApi.Moodle.Client.Ediciplinas
 
-  test "normalizes Moodle calendar events into planner assignments" do
-    payload = [
-      %{
-        "error" => false,
-        "data" => %{
-          "events" => [
-            %{
-              "id" => 42,
-              "name" => "Projeto final",
-              "course" => %{"fullname" => "ACH2016 Inteligencia Artificial"},
-              "url" => "https://edisciplinas.usp.br/mod/assign/view.php?id=42",
-              "timestart" => 1_773_446_400,
-              "modulename" => "assign"
-            },
-            %{
-              "id" => 43,
-              "name" => "Prova 1",
-              "modulename" => "quiz",
-              "timesort" => 1_773_532_800
-            }
-          ]
-        }
-      }
-    ]
+  test "parses authenticated course and activity pages" do
+    courses =
+      Ediciplinas.courses_from_html("""
+      <h5><a href="/course/view.php?id=101">ACH2016 Inteligencia Artificial</a></h5>
+      """)
 
-    assert [assignment, quiz] = Ediciplinas.assignments_from_payload(payload)
-    assert assignment.external_ref == "moodle:event:42"
-    assert assignment.course_name == "ACH2016 Inteligencia Artificial"
-    assert assignment.kind == "assignment"
-    assert assignment.due_at == ~U[2026-03-14 00:00:00Z]
-    assert quiz.kind == "exam"
+    assert [%{id: 101, title: "ACH2016 Inteligencia Artificial"}] = courses
+
+    assert {:ok, course} =
+             Ediciplinas.course_from_html(
+               """
+               <h1>ACH2016 Inteligencia Artificial</h1>
+               <main><a href="/mod/assign/view.php?id=9001">Lista 1</a></main>
+               """,
+               101
+             )
+
+    assert [%{id: 9001, title: "Lista 1", kind: "Tarefa"}] = course.activities
+
+    assert {:ok, activity} =
+             Ediciplinas.activity_from_html(
+               """
+               <h1>Lista 1</h1>
+               <main><p>Leia o enunciado.</p><a href="/mod/resource/view.php?id=30">Material</a></main>
+               """,
+               9001
+             )
+
+    assert activity.content =~ "Leia o enunciado"
+    assert [%{label: "Material"}] = activity.links
   end
 end
