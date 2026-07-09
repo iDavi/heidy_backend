@@ -235,17 +235,20 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
   end
 
   defp courses_from_document(document) do
-    course_links =
+    course_container =
       document
-      |> Floki.find("#unidades h5 a[href*='course/view.php?id=']")
+      |> Floki.find("#unidades")
       |> case do
-        [] -> Floki.find(document, "h5 a[href*='course/view.php?id=']")
-        links -> links
+        [] -> document
+        [container | _] -> container
       end
 
-    course_links
-    |> Enum.flat_map(fn link ->
-      with url when is_binary(url) <- link |> Floki.attribute("href") |> List.first(),
+    course_container
+    |> course_cards()
+    |> Enum.flat_map(fn %{heading: heading, summary: summary, teachers: teachers} ->
+      with link when not is_nil(link) <-
+             Floki.find(heading, "a[href*='course/view.php?id=']") |> List.first(),
+           url when is_binary(url) <- link |> Floki.attribute("href") |> List.first(),
            {:ok, id} <- course_id(url),
            title when title != "" <- clean_text(link) do
         {code, name} = course_identity(title)
@@ -256,6 +259,8 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
             code: code,
             name: name,
             title: title,
+            summary: summary,
+            teachers: teachers,
             url: absolute_url(url, @moodle_url)
           }
         ]
@@ -264,6 +269,45 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
       end
     end)
     |> Enum.uniq_by(& &1.id)
+  end
+
+  defp course_cards(nodes) when is_list(nodes) do
+    direct_course_cards(nodes) ++ Enum.flat_map(nodes, &course_cards/1)
+  end
+
+  defp course_cards({_, _, children}), do: course_cards(children)
+  defp course_cards(_node), do: []
+
+  defp direct_course_cards(nodes) do
+    nodes
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {node, index} ->
+      if heading?(node) do
+        following = nodes |> Enum.drop(index + 1) |> Enum.take(4)
+
+        [%{heading: node, teachers: teachers_from(following), summary: summary_from(following)}]
+      else
+        []
+      end
+    end)
+  end
+
+  defp heading?({"h5", _, _}), do: true
+  defp heading?(_node), do: false
+
+  defp teachers_from(nodes) do
+    nodes
+    |> Enum.flat_map(&Floki.find(&1, "a[href*='user/view.php']"))
+    |> Enum.map(&clean_text/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp summary_from(nodes) do
+    nodes
+    |> Enum.find_value(fn
+      {"p", _, _} = paragraph -> clean_text(paragraph)
+      _other -> nil
+    end)
   end
 
   defp activities_from_document(document) do

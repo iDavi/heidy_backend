@@ -32,6 +32,8 @@ defmodule HeidyApi.MoodleClientStub do
          code: "ACH2016",
          name: "Inteligencia Artificial",
          title: "ACH2016 Inteligencia Artificial",
+         summary: "Introducao aos fundamentos de inteligencia artificial.",
+         teachers: ["Profa. Ana"],
          url: "https://edisciplinas.usp.br/course/view.php?id=101"
        }
      ]}

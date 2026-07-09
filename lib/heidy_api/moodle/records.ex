@@ -33,13 +33,15 @@ defmodule HeidyApi.Moodle.Course do
   @moduledoc "A course visible to the student in e-Disciplinas."
 
   @enforce_keys [:id, :title, :url]
-  defstruct [:id, :code, :name, :title, :url]
+  defstruct [:id, :code, :name, :title, :summary, teachers: [], url: nil]
 
   @type t :: %__MODULE__{
           id: pos_integer(),
           code: String.t() | nil,
           name: String.t() | nil,
           title: String.t(),
+          summary: String.t() | nil,
+          teachers: [String.t()],
           url: String.t()
         }
 end

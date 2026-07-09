@@ -6,10 +6,20 @@ defmodule HeidyApi.Moodle.Client.EdiciplinasTest do
   test "parses authenticated course and activity pages" do
     courses =
       Ediciplinas.courses_from_html("""
-      <h5><a href="/course/view.php?id=101">ACH2016 Inteligencia Artificial</a></h5>
+      <h5><a href="/course/view.php?id=101">ACH2016 - Inteligencia Artificial (2026)</a></h5>
+      <ul><li><a href="/user/view.php?id=1">Profa. Ana</a></li></ul>
+      <p>Introducao aos fundamentos de inteligencia artificial.</p>
       """)
 
-    assert [%{id: 101, title: "ACH2016 Inteligencia Artificial"}] = courses
+    assert [
+             %{
+               id: 101,
+               code: "ACH2016",
+               name: "Inteligencia Artificial",
+               teachers: ["Profa. Ana"]
+             }
+           ] =
+             courses
 
     assert {:ok, course} =
              Ediciplinas.course_from_html(
