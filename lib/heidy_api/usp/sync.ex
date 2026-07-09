@@ -138,19 +138,47 @@ defmodule HeidyApi.Usp.Sync do
   defp upsert_semester(user, period) do
     attrs = Import.semester_attrs(period)
 
-    case Repo.one(
-           from(semester in Semester,
-             where: semester.user_id == ^user.id and semester.external_ref == ^period
-           )
-         ) do
-      nil ->
+    case fetch_import_semester(user, period, attrs) do
+      {:error, :not_found} ->
         %Semester{}
         |> Semester.changeset(Map.put(attrs, :user_id, user.id))
         |> Repo.insert!()
 
-      semester ->
+      {:ok, semester} ->
         semester
     end
+  end
+
+  defp fetch_import_semester(user, period, attrs) do
+    by_external_ref =
+      Repo.one(
+        from(semester in Semester,
+          where: semester.user_id == ^user.id and semester.external_ref == ^period
+        )
+      )
+
+    if by_external_ref do
+      {:ok, by_external_ref}
+    else
+      fetch_matching_semester(user, attrs)
+    end
+  end
+
+  defp fetch_matching_semester(user, attrs) do
+    semester =
+      Repo.one(
+        from(semester in Semester,
+          where:
+            semester.user_id == ^user.id and
+              (semester.label == ^attrs.label or
+                 (not is_nil(semester.start_date) and not is_nil(semester.end_date) and
+                    semester.start_date <= ^attrs.end_date and
+                    semester.end_date >= ^attrs.start_date)),
+          limit: 1
+        )
+      )
+
+    if semester, do: {:ok, semester}, else: {:error, :not_found}
   end
 
   defp upsert_enrollment(user, semester, %{meetings: meetings} = attrs) do
