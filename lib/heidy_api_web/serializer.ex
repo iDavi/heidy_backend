@@ -56,7 +56,8 @@ defmodule HeidyApiWeb.Serializer do
       :status,
       :priority,
       :due_at,
-      :source
+      :source,
+      :external_ref
     ])
   end
 

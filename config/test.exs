@@ -16,6 +16,7 @@ config :heidy_api, HeidyApiWeb.Endpoint,
 # no HTTP leaves the test run and no real cryptography is exercised.
 config :heidy_api,
   usp_client: HeidyApi.UspClientStub,
+  moodle_client: HeidyApi.MoodleClientStub,
   vault: HeidyApi.VaultStub,
   session_token_secret: "test-session-token-secret",
   demo_session_token: "test-token",

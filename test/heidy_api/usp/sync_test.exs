@@ -1,7 +1,7 @@
 defmodule HeidyApi.Usp.SyncTest do
   use HeidyApi.DataCase, async: true
 
-  alias HeidyApi.Planner.{Enrollment, Meeting, Semester}
+  alias HeidyApi.Planner.{Enrollment, Meeting, Semester, Task}
   alias HeidyApi.Usp.{Sync, SyncRun}
 
   describe "sync runs" do
@@ -50,6 +50,25 @@ defmodule HeidyApi.Usp.SyncTest do
       assert Repo.aggregate(Semester, :count) == 1
       assert Repo.aggregate(Enrollment, :count) == 1
       assert Repo.aggregate(Meeting, :count) == 1
+    end
+
+    test "perform imports Moodle calendar events idempotently while preserving task status" do
+      user = user_fixture(%{usp_username: "7654327"})
+      {:ok, run} = Sync.start(user, %{credential_blob: "stub-blob", sources: ["moodle"]})
+
+      assert %SyncRun{status: "succeeded", counts: %{"moodle" => 1}} =
+               Sync.perform(run, user, "stub-password")
+
+      assert %Task{source: "moodle", external_ref: "moodle:event:9001", status: "todo"} =
+               task = Repo.one!(Task)
+
+      task |> Task.update_changeset(%{status: "done"}) |> Repo.update!()
+
+      assert %SyncRun{status: "succeeded", counts: %{"moodle" => 1}} =
+               Sync.perform(Repo.get!(SyncRun, run.id), user, "stub-password")
+
+      assert Repo.aggregate(Task, :count) == 1
+      assert Repo.get!(Task, task.id).status == "done"
     end
 
     test "manual enrollments with the same external_ref are not overwritten by sync" do

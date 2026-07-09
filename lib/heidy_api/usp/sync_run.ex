@@ -5,7 +5,7 @@ defmodule HeidyApi.Usp.SyncRun do
   """
 
   @statuses ~w(pending running succeeded failed)
-  @sources ~w(schedule grades absences)
+  @sources ~w(schedule grades absences moodle)
 
   use HeidyApi.Schema
 

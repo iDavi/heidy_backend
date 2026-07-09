@@ -20,6 +20,7 @@ defmodule HeidyApi.Planner.Task do
     field(:status, :string, default: "todo")
     field(:priority, :string, default: "normal")
     field(:source, :string, default: "manual")
+    field(:external_ref, :string)
 
     timestamps(type: :utc_datetime)
   end
@@ -48,7 +49,8 @@ defmodule HeidyApi.Planner.Task do
       :kind,
       :status,
       :priority,
-      :source
+      :source,
+      :external_ref
     ])
     |> put_new_id()
     |> validate_required([:id, :user_id, :title])
@@ -70,6 +72,7 @@ defmodule HeidyApi.Planner.Task do
     |> validate_inclusion(:kind, @kinds)
     |> validate_inclusion(:status, @statuses)
     |> validate_inclusion(:priority, @priorities)
-    |> validate_inclusion(:source, ~w(manual usp))
+    |> validate_inclusion(:source, ~w(manual usp moodle))
+    |> unique_constraint(:external_ref, name: :tasks_user_id_external_ref_index)
   end
 end

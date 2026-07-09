@@ -13,7 +13,8 @@ defmodule HeidyApi.Usp.Sync do
   alias HeidyApi.Accounts.User
   alias HeidyApi.Changeset
   alias HeidyApi.Credentials
-  alias HeidyApi.Planner.{Enrollment, Meeting, Semester}
+  alias HeidyApi.Moodle
+  alias HeidyApi.Planner.{Enrollment, Meeting, Semester, Task}
   alias HeidyApi.Usp.{Import, SyncRun}
   alias HeidyApi.{Demo, Ids, Page, Repo, Usp}
 
@@ -42,7 +43,7 @@ defmodule HeidyApi.Usp.Sync do
         |> Changeset.normalize_result()
 
       if Application.get_env(:heidy_api, :sync_async, true) do
-        Task.Supervisor.start_child(__MODULE__.TaskSupervisor, fn ->
+        Elixir.Task.Supervisor.start_child(__MODULE__.TaskSupervisor, fn ->
           perform(run, user, password)
         end)
       end
@@ -93,7 +94,7 @@ defmodule HeidyApi.Usp.Sync do
     try do
       case Usp.client().login(user.usp_username, password) do
         {:ok, session} ->
-          counts = Map.new(run.sources, &{&1, import_source(&1, session, user)})
+          counts = Map.new(run.sources, &{&1, import_source(&1, session, user, password)})
           finish(run, %{status: "succeeded", counts: counts})
 
         {:error, :invalid_credentials} ->
@@ -122,7 +123,7 @@ defmodule HeidyApi.Usp.Sync do
     run |> SyncRun.changeset(attrs) |> Repo.update!()
   end
 
-  defp import_source("schedule", session, user) do
+  defp import_source("schedule", session, user, _password) do
     with {:ok, slots} <- Usp.client().fetch_schedule(session),
          {:ok, periods} <- Usp.client().list_periods(session) do
       semester = upsert_semester(user, current_period(periods))
@@ -136,10 +137,77 @@ defmodule HeidyApi.Usp.Sync do
     end
   end
 
+  defp import_source("moodle", _session, user, password) do
+    with {:ok, moodle_session} <- Moodle.client().login(user.usp_username, password),
+         {:ok, assignments} <- Moodle.client().fetch_assignments(moodle_session) do
+      assignments
+      |> Enum.map(&upsert_moodle_task(user, &1))
+      |> length()
+    else
+      _unavailable -> 0
+    end
+  end
+
   # Grades and absences ride on the same imported enrollments; USP only
   # publishes them per closed period, so today they import as zero rows
   # rather than failing the run.
-  defp import_source(_other_source, _session, _user), do: 0
+  defp import_source(_other_source, _session, _user, _password), do: 0
+
+  defp upsert_moodle_task(user, assignment) do
+    attrs = %{
+      user_id: user.id,
+      title: assignment.title,
+      notes: moodle_notes(assignment),
+      due_at: assignment.due_at,
+      kind: assignment.kind,
+      source: "moodle",
+      external_ref: assignment.external_ref
+    }
+
+    case Repo.one(
+           from(task in Task,
+             where: task.user_id == ^user.id and task.external_ref == ^assignment.external_ref
+           )
+         ) do
+      nil ->
+        %Task{}
+        |> Task.changeset(attrs)
+        |> Repo.insert()
+        |> case do
+          {:ok, task} ->
+            task
+
+          {:error, _changeset} ->
+            Repo.one!(
+              from(task in Task,
+                where: task.user_id == ^user.id and task.external_ref == ^assignment.external_ref
+              )
+            )
+        end
+
+      %{source: "moodle"} = task ->
+        # Moodle owns the event metadata, while the student owns completion
+        # status and priority in heidy.
+        task
+        |> Task.update_changeset(Map.take(attrs, [:title, :notes, :due_at, :kind]))
+        |> Repo.update!()
+
+      task ->
+        # An externally seeded/manual task can reserve the same reference;
+        # imports never clobber it.
+        task
+    end
+  end
+
+  defp moodle_notes(assignment) do
+    [assignment.course_name, assignment.url]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+    |> case do
+      "" -> nil
+      notes -> String.slice(notes, 0, 2_000)
+    end
+  end
 
   defp current_period([_head | _tail] = periods), do: Enum.max(periods)
   defp current_period(_empty), do: nil
