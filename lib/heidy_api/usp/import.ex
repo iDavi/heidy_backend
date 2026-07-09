@@ -33,15 +33,20 @@ defmodule HeidyApi.Usp.Import do
   end
 
   @doc "Maps schedule slots to enrollment attributes, one per class, with meetings."
-  @spec enrollments_from_schedule([ClassSlot.t()]) :: [map()]
-  def enrollments_from_schedule(slots) do
+  @spec enrollments_from_schedule([ClassSlot.t()], [EnrollmentRecord.t()]) :: [map()]
+  def enrollments_from_schedule(slots, records \\ []) do
+    titles =
+      Map.new(records, &{external_ref(&1.discipline_code, &1.class_code), enrollment_title(&1)})
+
     slots
     |> Enum.group_by(&{&1.discipline_code, &1.class_code})
     |> Enum.map(fn {{discipline_code, class_code}, class_slots} ->
+      external_ref = external_ref(discipline_code, class_code)
+
       %{
-        title: discipline_code,
+        title: Map.get(titles, external_ref, discipline_code),
         source: "usp",
-        external_ref: external_ref(discipline_code, class_code),
+        external_ref: external_ref,
         meetings: Enum.map(class_slots, &meeting_attrs/1)
       }
     end)
@@ -51,7 +56,7 @@ defmodule HeidyApi.Usp.Import do
   @spec enrollment_attrs(EnrollmentRecord.t()) :: map()
   def enrollment_attrs(%EnrollmentRecord{} = record) do
     %{
-      title: "#{record.discipline_code} #{record.discipline_name}",
+      title: enrollment_title(record),
       source: "usp",
       external_ref: external_ref(record.discipline_code, record.class_code)
     }
@@ -65,4 +70,7 @@ defmodule HeidyApi.Usp.Import do
 
   defp external_ref(discipline_code, nil), do: discipline_code
   defp external_ref(discipline_code, class_code), do: "#{discipline_code}-#{class_code}"
+
+  defp enrollment_title(%EnrollmentRecord{discipline_code: code, discipline_name: name}),
+    do: "#{code} #{name}"
 end

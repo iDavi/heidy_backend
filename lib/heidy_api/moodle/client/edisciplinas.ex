@@ -44,7 +44,7 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
         courses
         |> Enum.flat_map(fn course ->
           case fetch_course(session, course.id) do
-            {:ok, detail} -> assignments_from_course(course, detail)
+            {:ok, detail} -> assignments_from_course(session, course, detail)
             {:error, _reason} -> []
           end
         end)
@@ -167,15 +167,22 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
 
   defp complete_saml(_session, _response, _base_url, _redirects), do: {:error, :unavailable}
 
-  defp assignments_from_course(course, detail) do
+  defp assignments_from_course(session, course, detail) do
     detail.activities
     |> Enum.filter(&(&1.kind in ["Tarefa", "Questionario"]))
     |> Enum.map(fn activity ->
+      due_at =
+        case fetch_activity(session, activity.url) do
+          {:ok, detail} -> due_at(detail.content)
+          {:error, _reason} -> nil
+        end
+
       %Assignment{
         external_ref: "moodle:activity:#{activity.id}",
         title: activity.title,
         course_name: course.title,
         url: activity.url,
+        due_at: due_at,
         kind: if(activity.kind == "Questionario", do: "exam", else: "assignment")
       }
     end)
@@ -241,7 +248,17 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
       with url when is_binary(url) <- link |> Floki.attribute("href") |> List.first(),
            {:ok, id} <- course_id(url),
            title when title != "" <- clean_text(link) do
-        [%Course{id: id, title: title, url: absolute_url(url, @moodle_url)}]
+        {code, name} = course_identity(title)
+
+        [
+          %Course{
+            id: id,
+            code: code,
+            name: name,
+            title: title,
+            url: absolute_url(url, @moodle_url)
+          }
+        ]
       else
         _invalid -> []
       end
@@ -353,6 +370,62 @@ defmodule HeidyApi.Moodle.Client.Ediciplinas do
       "url" -> "Link"
       _other -> "Atividade"
     end
+  end
+
+  defp course_identity(title) do
+    case Regex.run(~r/^([A-Z]{2,6}\d{4})\s*[-–]\s*(.+?)(?:\s*\(\d{4}\))?$/u, title) do
+      [_, code, name] -> {code, name}
+      _other -> {nil, title}
+    end
+  end
+
+  @months %{
+    "janeiro" => 1,
+    "fevereiro" => 2,
+    "marco" => 3,
+    "abril" => 4,
+    "maio" => 5,
+    "junho" => 6,
+    "julho" => 7,
+    "agosto" => 8,
+    "setembro" => 9,
+    "outubro" => 10,
+    "novembro" => 11,
+    "dezembro" => 12
+  }
+
+  defp due_at(content) do
+    case Regex.run(
+           ~r/(?:data de entrega|due date)\s*:?\s*(?:[^\d]{0,32})?(\d{1,2}) de ([[:alpha:]áéíóúâêôãõç]+) de (\d{4}),?\s*(\d{1,2}):(\d{2})/iu,
+           content
+         ) do
+      [_, day, month, year, hour, minute] ->
+        with month_number when is_integer(month_number) <-
+               Map.get(@months, normalize_month(month)),
+             {day, ""} <- Integer.parse(day),
+             {year, ""} <- Integer.parse(year),
+             {hour, ""} <- Integer.parse(hour),
+             {minute, ""} <- Integer.parse(minute),
+             {:ok, date} <- Date.new(year, month_number, day),
+             {:ok, time} <- Time.new(hour, minute, 0) do
+          date
+          |> NaiveDateTime.new!(time)
+          |> DateTime.from_naive!("Etc/UTC")
+          |> DateTime.add(3, :hour)
+        else
+          _invalid -> nil
+        end
+
+      _none ->
+        nil
+    end
+  end
+
+  defp normalize_month(month) do
+    month
+    |> String.downcase()
+    |> String.normalize(:nfd)
+    |> String.replace(~r/[^a-z]/u, "")
   end
 
   defp authenticated?(%{body: body}) when is_binary(body) do

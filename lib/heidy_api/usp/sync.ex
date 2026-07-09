@@ -126,10 +126,23 @@ defmodule HeidyApi.Usp.Sync do
   defp import_source("schedule", session, user, _password) do
     with {:ok, slots} <- Usp.client().fetch_schedule(session),
          {:ok, periods} <- Usp.client().list_periods(session) do
-      semester = upsert_semester(user, current_period(periods))
+      period = current_period(periods)
+      semester = upsert_semester(user, period)
+
+      records =
+        case period do
+          nil ->
+            []
+
+          period ->
+            case Usp.client().fetch_enrollments(session, period) do
+              {:ok, enrollments} -> enrollments
+              {:error, _reason} -> []
+            end
+        end
 
       slots
-      |> Import.enrollments_from_schedule()
+      |> Import.enrollments_from_schedule(records)
       |> Enum.map(&upsert_enrollment(user, semester, &1))
       |> length()
     else
@@ -156,6 +169,7 @@ defmodule HeidyApi.Usp.Sync do
   defp upsert_moodle_task(user, assignment) do
     attrs = %{
       user_id: user.id,
+      enrollment_id: matching_moodle_enrollment(user, assignment.course_name),
       title: assignment.title,
       notes: moodle_notes(assignment),
       due_at: assignment.due_at,
@@ -189,7 +203,11 @@ defmodule HeidyApi.Usp.Sync do
         # Moodle owns the event metadata, while the student owns completion
         # status and priority in heidy.
         task
-        |> Task.update_changeset(Map.take(attrs, [:title, :notes, :due_at, :kind]))
+        |> Task.update_changeset(
+          attrs
+          |> Map.take([:title, :notes, :due_at, :kind, :enrollment_id])
+          |> Map.drop(if(task.enrollment_id, do: [:enrollment_id], else: []))
+        )
         |> Repo.update!()
 
       task ->
@@ -206,6 +224,27 @@ defmodule HeidyApi.Usp.Sync do
     |> case do
       "" -> nil
       notes -> String.slice(notes, 0, 2_000)
+    end
+  end
+
+  defp matching_moodle_enrollment(_user, nil), do: nil
+
+  defp matching_moodle_enrollment(user, course_name) do
+    case Regex.run(~r/^([A-Z]{2,6}\d{4})\b/u, course_name) do
+      [_, code] ->
+        Repo.one(
+          from(enrollment in Enrollment,
+            where: enrollment.user_id == ^user.id and ilike(enrollment.title, ^"#{code}%"),
+            limit: 1
+          )
+        )
+        |> case do
+          nil -> nil
+          enrollment -> enrollment.id
+        end
+
+      _other ->
+        nil
     end
   end
 
@@ -304,18 +343,24 @@ defmodule HeidyApi.Usp.Sync do
   end
 
   defp insert_enrollment(user, semester, attrs) do
-    %Enrollment{}
-    |> Enrollment.changeset(Map.merge(attrs, %{user_id: user.id, semester_id: semester.id}))
-    |> Repo.insert()
-    |> case do
-      {:ok, enrollment} ->
-        enrollment
+    case find_conflicting_enrollment(user, semester, attrs) do
+      nil ->
+        %Enrollment{}
+        |> Enrollment.changeset(Map.merge(attrs, %{user_id: user.id, semester_id: semester.id}))
+        |> Repo.insert()
+        |> case do
+          {:ok, enrollment} ->
+            enrollment
 
-      {:error, _changeset} ->
-        # Another row (manual or a concurrent sync) already claims this
-        # class's discipline/title in the semester - reuse it instead of
-        # crashing; its own source/ownership rules apply on the next pass.
-        find_conflicting_enrollment(user, semester, attrs)
+          {:error, _changeset} ->
+            # Another row (manual or a concurrent sync) already claims this
+            # class's discipline/title in the semester - reuse it instead of
+            # crashing; its own source/ownership rules apply on the next pass.
+            find_conflicting_enrollment(user, semester, attrs)
+        end
+
+      enrollment ->
+        enrollment
     end
   end
 
@@ -334,10 +379,20 @@ defmodule HeidyApi.Usp.Sync do
   # sync attrs actually carry.
   defp conflict_filter(nil, nil), do: dynamic(false)
   defp conflict_filter(discipline_id, nil), do: dynamic([e], e.discipline_id == ^discipline_id)
-  defp conflict_filter(nil, title), do: dynamic([e], e.title == ^title)
+  defp conflict_filter(nil, title), do: title_filter(title)
 
   defp conflict_filter(discipline_id, title),
-    do: dynamic([e], e.discipline_id == ^discipline_id or e.title == ^title)
+    do: dynamic([e], e.discipline_id == ^discipline_id or ^title_filter(title))
+
+  # A manually created class may use only the discipline code, while the
+  # importer has the more useful `CODE Name` label. Treat both as the same
+  # class when resolving a concurrent/duplicate insert.
+  defp title_filter(title) do
+    case Regex.run(~r/^([A-Z]{2,6}\d{4})\b/u, title) do
+      [_, code] -> dynamic([e], e.title == ^title or e.title == ^code)
+      _other -> dynamic([e], e.title == ^title)
+    end
+  end
 
   defp upsert_meeting(enrollment, attrs) do
     %Meeting{}

@@ -29,6 +29,8 @@ defmodule HeidyApi.MoodleClientStub do
      [
        %Course{
          id: 101,
+         code: "ACH2016",
+         name: "Inteligencia Artificial",
          title: "ACH2016 Inteligencia Artificial",
          url: "https://edisciplinas.usp.br/course/view.php?id=101"
        }
