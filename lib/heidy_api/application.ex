@@ -7,6 +7,7 @@ defmodule HeidyApi.Application do
   def start(_type, _args) do
     children = [
       HeidyApi.Repo,
+      HeidyApi.Moodle.SessionCache,
       {Task.Supervisor, name: HeidyApi.Usp.Sync.TaskSupervisor},
       HeidyApiWeb.Endpoint
     ]
