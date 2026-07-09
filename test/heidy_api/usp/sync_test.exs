@@ -102,14 +102,14 @@ defmodule HeidyApi.Usp.SyncTest do
       user = user_fixture(%{usp_username: "7654326"})
       {:ok, run} = Sync.start(user, %{credential_blob: "stub-blob", sources: ["schedule"]})
 
-      # Deleting the user out from under an in-flight run cascades the
-      # sync_run row away too, so the worker's own status update hits a
-      # stale record - the kind of unexpected failure perform/3 must
-      # still resolve to a terminal status rather than crash on.
-      Repo.delete!(user)
+      # A user_id that isn't backed by an actual row makes the semester
+      # insert hit an undeclared foreign_key_constraint and raise - the
+      # kind of unexpected failure perform/3 must still resolve to a
+      # terminal status on, rather than crash and leave the run "running".
+      bogus_user = %{user | id: HeidyApi.Ids.generate()}
 
       assert %SyncRun{status: "failed", error: error} =
-               Sync.perform(run, user, "stub-password")
+               Sync.perform(run, bogus_user, "stub-password")
 
       assert error =~ "Sync failed"
     end

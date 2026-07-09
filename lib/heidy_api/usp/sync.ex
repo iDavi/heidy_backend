@@ -250,15 +250,22 @@ defmodule HeidyApi.Usp.Sync do
   defp find_conflicting_enrollment(user, semester, attrs) do
     Repo.one(
       from(enrollment in Enrollment,
-        where:
-          enrollment.user_id == ^user.id and enrollment.semester_id == ^semester.id and
-            ((not is_nil(enrollment.discipline_id) and
-                enrollment.discipline_id == ^attrs[:discipline_id]) or
-               (not is_nil(enrollment.title) and enrollment.title == ^attrs[:title])),
+        where: enrollment.user_id == ^user.id and enrollment.semester_id == ^semester.id,
+        where: ^conflict_filter(attrs[:discipline_id], attrs[:title]),
         limit: 1
       )
     )
   end
+
+  # Ecto forbids comparing a field to a pinned nil (`field == ^nil`), so the
+  # discipline_id/title equality checks can only be built for the ones the
+  # sync attrs actually carry.
+  defp conflict_filter(nil, nil), do: dynamic(false)
+  defp conflict_filter(discipline_id, nil), do: dynamic([e], e.discipline_id == ^discipline_id)
+  defp conflict_filter(nil, title), do: dynamic([e], e.title == ^title)
+
+  defp conflict_filter(discipline_id, title),
+    do: dynamic([e], e.discipline_id == ^discipline_id or e.title == ^title)
 
   defp upsert_meeting(enrollment, attrs) do
     %Meeting{}
