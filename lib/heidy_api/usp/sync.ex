@@ -90,16 +90,23 @@ defmodule HeidyApi.Usp.Sync do
   def perform(%SyncRun{} = run, %User{} = user, password) do
     run = update_run!(run, %{status: "running"})
 
-    case Usp.client().login(user.usp_username, password) do
-      {:ok, session} ->
-        counts = Map.new(run.sources, &{&1, import_source(&1, session, user)})
-        finish(run, %{status: "succeeded", counts: counts})
+    try do
+      case Usp.client().login(user.usp_username, password) do
+        {:ok, session} ->
+          counts = Map.new(run.sources, &{&1, import_source(&1, session, user)})
+          finish(run, %{status: "succeeded", counts: counts})
 
-      {:error, :invalid_credentials} ->
-        finish(run, %{status: "failed", error: "USP rejected the stored credential"})
+        {:error, :invalid_credentials} ->
+          finish(run, %{status: "failed", error: "USP rejected the stored credential"})
 
-      {:error, :unavailable} ->
-        finish(run, %{status: "failed", error: "USP is unreachable"})
+        {:error, :unavailable} ->
+          finish(run, %{status: "failed", error: "USP is unreachable"})
+      end
+    rescue
+      # A run must never be left stuck at "running" - an unexpected error
+      # (a lost race with a concurrent sync, a USP data quirk, etc.) still
+      # has to resolve to a terminal status.
+      error -> finish(run, %{status: "failed", error: "Sync failed: #{Exception.message(error)}"})
     end
   end
 
@@ -139,12 +146,25 @@ defmodule HeidyApi.Usp.Sync do
     attrs = Import.semester_attrs(period)
 
     case fetch_import_semester(user, period, attrs) do
-      {:error, :not_found} ->
-        %Semester{}
-        |> Semester.changeset(Map.put(attrs, :user_id, user.id))
-        |> Repo.insert!()
+      {:error, :not_found} -> insert_semester(user, attrs)
+      {:ok, semester} -> semester
+    end
+  end
 
+  defp insert_semester(user, attrs) do
+    %Semester{}
+    |> Semester.changeset(Map.put(attrs, :user_id, user.id))
+    |> Repo.insert()
+    |> case do
       {:ok, semester} ->
+        semester
+
+      {:error, _changeset} ->
+        # Lost a race to a concurrent insert (or sync) that created a
+        # matching semester in between our check and this insert - the
+        # unique/exclusion constraints mirror fetch_matching_semester's
+        # own match, so it is guaranteed to find the row that won.
+        {:ok, semester} = fetch_matching_semester(user, attrs)
         semester
     end
   end
@@ -192,17 +212,16 @@ defmodule HeidyApi.Usp.Sync do
              )
            ) do
         nil ->
-          %Enrollment{}
-          |> Enrollment.changeset(
-            Map.merge(enrollment_attrs, %{user_id: user.id, semester_id: semester.id})
-          )
-          |> Repo.insert!()
+          insert_enrollment(user, semester, enrollment_attrs)
 
         # Manual edits win: only rows still owned by the sync are updated.
         %{source: "usp"} = enrollment ->
-          enrollment
-          |> Enrollment.changeset(enrollment_attrs)
-          |> Repo.update!()
+          case enrollment |> Enrollment.changeset(enrollment_attrs) |> Repo.update() do
+            {:ok, updated} -> updated
+            # A concurrent write claimed the same class in the meantime;
+            # keep the row as it stood rather than crash the sync.
+            {:error, _changeset} -> enrollment
+          end
 
         enrollment ->
           enrollment
@@ -212,24 +231,47 @@ defmodule HeidyApi.Usp.Sync do
     enrollment
   end
 
-  defp upsert_meeting(enrollment, attrs) do
-    meeting =
-      %Meeting{}
-      |> Meeting.changeset(Map.put(attrs, :enrollment_id, enrollment.id))
-      |> Ecto.Changeset.apply_action!(:insert)
+  defp insert_enrollment(user, semester, attrs) do
+    %Enrollment{}
+    |> Enrollment.changeset(Map.merge(attrs, %{user_id: user.id, semester_id: semester.id}))
+    |> Repo.insert()
+    |> case do
+      {:ok, enrollment} ->
+        enrollment
 
-    duplicate? =
-      Repo.exists?(
-        from(existing in Meeting,
-          where:
-            existing.enrollment_id == ^enrollment.id and
-              existing.day_of_week == ^meeting.day_of_week and
-              existing.starts_at == ^meeting.starts_at
-        )
+      {:error, _changeset} ->
+        # Another row (manual or a concurrent sync) already claims this
+        # class's discipline/title in the semester - reuse it instead of
+        # crashing; its own source/ownership rules apply on the next pass.
+        find_conflicting_enrollment(user, semester, attrs)
+    end
+  end
+
+  defp find_conflicting_enrollment(user, semester, attrs) do
+    Repo.one(
+      from(enrollment in Enrollment,
+        where:
+          enrollment.user_id == ^user.id and enrollment.semester_id == ^semester.id and
+            ((not is_nil(enrollment.discipline_id) and
+                enrollment.discipline_id == ^attrs[:discipline_id]) or
+               (not is_nil(enrollment.title) and enrollment.title == ^attrs[:title])),
+        limit: 1
       )
+    )
+  end
 
-    unless duplicate? do
-      %Meeting{} |> Meeting.changeset(Map.from_struct(meeting)) |> Repo.insert!()
+  defp upsert_meeting(enrollment, attrs) do
+    %Meeting{}
+    |> Meeting.changeset(Map.put(attrs, :enrollment_id, enrollment.id))
+    |> Repo.insert()
+    |> case do
+      {:ok, _meeting} ->
+        :ok
+
+      {:error, _changeset} ->
+        # Already recorded (idempotent re-sync) or overlaps an existing
+        # meeting for this class - either way, nothing to do.
+        :ok
     end
   end
 
