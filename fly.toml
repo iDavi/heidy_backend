@@ -2,6 +2,8 @@ app = "heidy-backend"
 primary_region = "gru"
 
 [build]
+  [build.args]
+    ELIXIR_VERSION = "1.18"
 
 [http_service]
   internal_port = 4000
