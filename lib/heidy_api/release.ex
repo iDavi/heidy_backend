@@ -7,15 +7,16 @@ defmodule HeidyApi.Release do
     load_app()
 
     for repo <- repos() do
-      {:ok, _started} = repo.start_link(pool_size: 2)
-      Ecto.Migrator.run(repo, :up, all: true)
+      {:ok, _migrated, _apps} =
+        Ecto.Migrator.with_repo(repo, &Ecto.Migrator.run(&1, :up, all: true))
     end
   end
 
   def rollback(repo, version) do
     load_app()
-    {:ok, _started} = repo.start_link(pool_size: 2)
-    Ecto.Migrator.run(repo, :down, to: version)
+
+    {:ok, _rolled_back, _apps} =
+      Ecto.Migrator.with_repo(repo, &Ecto.Migrator.run(&1, :down, to: version))
   end
 
   defp repos do
