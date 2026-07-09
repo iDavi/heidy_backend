@@ -1,5 +1,13 @@
 import Config
 
+config :heidy_api, HeidyApi.Repo,
+  username: System.get_env("POSTGRES_USER") || "postgres",
+  password: System.get_env("POSTGRES_PASSWORD") || "postgres",
+  hostname: System.get_env("POSTGRES_HOST") || "localhost",
+  database: System.get_env("POSTGRES_DB") || "heidy_api_test",
+  pool: Ecto.Adapters.SQL.Sandbox,
+  pool_size: 10
+
 config :heidy_api, HeidyApiWeb.Endpoint,
   secret_key_base: "aeIrgz9DM5jUMFyIkY3mUt91V25nOnjPuBHZ1oh0itopetJ8Cz2WKAAnj8oBmiXc",
   server: false

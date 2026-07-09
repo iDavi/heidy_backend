@@ -1,26 +1,52 @@
 defmodule HeidyApi.Planner.Grade do
   @moduledoc "One graded assessment of a class (e.g. `P1`, score 8.5 of 10)."
 
-  @enforce_keys [:id, :enrollment_id, :label]
-  defstruct [
-    :id,
-    :enrollment_id,
-    :label,
-    :score,
-    max_score: 10.0,
-    weight: 1.0,
-    source: "manual",
-    external_ref: nil
-  ]
+  use HeidyApi.Schema
 
-  @type t :: %__MODULE__{
-          id: String.t(),
-          enrollment_id: String.t(),
-          label: String.t(),
-          score: number() | nil,
-          max_score: number(),
-          weight: number(),
-          source: String.t(),
-          external_ref: String.t() | nil
-        }
+  import Ecto.Changeset
+
+  alias HeidyApi.Ids
+
+  schema "grades" do
+    field(:enrollment_id, :binary_id)
+    field(:label, :string)
+    field(:score, :float)
+    field(:max_score, :float, default: 10.0)
+    field(:weight, :float, default: 1.0)
+    field(:source, :string, default: "manual")
+    field(:external_ref, :string)
+
+    timestamps(type: :utc_datetime)
+  end
+
+  @type t :: %__MODULE__{}
+
+  @spec changeset(t(), map()) :: Ecto.Changeset.t()
+  def changeset(grade, attrs) do
+    grade
+    |> cast(attrs, [
+      :id,
+      :enrollment_id,
+      :label,
+      :score,
+      :max_score,
+      :weight,
+      :source,
+      :external_ref
+    ])
+    |> put_new_id()
+    |> validate_required([:id, :enrollment_id, :label])
+    |> validate_length(:label, max: 80)
+    |> validate_number(:score, greater_than_or_equal_to: 0)
+    |> validate_number(:max_score, greater_than: 0)
+    |> validate_number(:weight, greater_than: 0)
+    |> validate_inclusion(:source, ~w(manual usp))
+  end
+
+  defp put_new_id(changeset) do
+    case get_field(changeset, :id) do
+      nil -> put_change(changeset, :id, Ids.generate())
+      _id -> changeset
+    end
+  end
 end

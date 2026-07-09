@@ -3,16 +3,19 @@ defmodule HeidyApi.Planner do
   The student's academic life: semesters, enrollments, meetings, tasks,
   grades and absences, plus the computed schedule and summaries.
 
-  Rows may be manual or imported from USP — same schemas, distinguished by
+  Rows may be manual or imported from USP - same schemas, distinguished by
   `source`/`external_ref`. Imports upsert by `external_ref` and never
   overwrite manual rows.
   """
 
+  import Ecto.Query
+
   alias HeidyApi.Accounts.User
   alias HeidyApi.Catalog
+  alias HeidyApi.Changeset
   alias HeidyApi.Planner.{Absence, AttendanceSummary, Enrollment, Grade, GradeSummary}
   alias HeidyApi.Planner.{Meeting, Schedule, Semester, Task}
-  alias HeidyApi.{Ids, Page, Store}
+  alias HeidyApi.{Demo, Ids, Page, Repo}
 
   @type result(t) ::
           {:ok, t} | {:error, :not_found | {:conflict, String.t()} | {:validation, map()}}
@@ -21,12 +24,11 @@ defmodule HeidyApi.Planner do
 
   @spec create_semester(User.t(), map()) :: result(Semester.t())
   def create_semester(%User{} = user, attrs) do
-    semester = struct!(%Semester{id: Ids.generate(), user_id: user.id, label: nil}, attrs)
+    attrs = Map.put(attrs, :user_id, user.id)
 
-    if Enum.any?(owned(:semesters, user), &same_period?(&1, semester)) do
-      {:error, {:conflict, "A semester with this label or overlapping dates already exists"}}
-    else
-      {:ok, Store.put(:semesters, semester)}
+    with {:ok, semester} <- build(Semester, attrs),
+         :ok <- ensure_unique_period(user, semester) do
+      insert(semester)
     end
   end
 
@@ -41,13 +43,19 @@ defmodule HeidyApi.Planner do
   @spec fetch_semester(User.t(), String.t()) :: result(Semester.t())
   def fetch_semester(%User{} = user, id), do: fetch_owned(:semesters, user, id)
 
-  @spec update_semester(Semester.t(), map()) :: {:ok, Semester.t()}
+  @spec update_semester(Semester.t(), map()) :: result(Semester.t())
   def update_semester(%Semester{} = semester, attrs) do
-    {:ok, Store.put(:semesters, struct!(semester, attrs))}
+    semester |> Semester.changeset(attrs) |> Repo.update() |> normalize_changeset_error()
   end
 
   @spec delete_semester(User.t(), String.t()) :: :ok
-  def delete_semester(%User{}, id), do: Store.delete(:semesters, id)
+  def delete_semester(%User{} = user, id) do
+    Repo.delete_all(
+      from(semester in Semester, where: semester.user_id == ^user.id and semester.id == ^id)
+    )
+
+    :ok
+  end
 
   ## Enrollments
 
@@ -55,13 +63,12 @@ defmodule HeidyApi.Planner do
   def create_enrollment(%User{} = user, attrs) do
     with {:ok, _semester} <- fetch_semester(user, attrs.semester_id),
          :ok <- ensure_discipline(attrs[:discipline_id]) do
-      enrollment =
-        struct!(%Enrollment{id: Ids.generate(), user_id: user.id, semester_id: nil}, attrs)
+      attrs = Map.put(attrs, :user_id, user.id)
 
-      if Enum.any?(owned(:enrollments, user), &same_class?(&1, enrollment)) do
-        {:error, {:conflict, "This class is already in the semester"}}
-      else
-        {:ok, Store.put(:enrollments, enrollment)}
+      with {:ok, enrollment} <- build(Enrollment, attrs),
+           :ok <- ensure_unique_class(user, enrollment),
+           {:ok, enrollment} <- insert(enrollment) do
+        {:ok, load_meetings(enrollment)}
       end
     end
   end
@@ -82,36 +89,35 @@ defmodule HeidyApi.Planner do
     end
   end
 
-  @spec update_enrollment(Enrollment.t(), map()) :: {:ok, Enrollment.t()}
+  @spec update_enrollment(Enrollment.t(), map()) :: result(Enrollment.t())
   def update_enrollment(%Enrollment{} = enrollment, attrs) do
-    {:ok, Store.put(:enrollments, struct!(enrollment, attrs))}
+    enrollment
+    |> Enrollment.changeset(attrs)
+    |> Repo.update()
+    |> normalize_changeset_error()
+    |> preload_meetings()
   end
 
   @spec delete_enrollment(User.t(), String.t()) :: :ok
-  def delete_enrollment(%User{}, id), do: Store.delete(:enrollments, id)
+  def delete_enrollment(%User{} = user, id) do
+    Repo.delete_all(
+      from(enrollment in Enrollment,
+        where: enrollment.user_id == ^user.id and enrollment.id == ^id
+      )
+    )
+
+    :ok
+  end
 
   ## Meetings
 
   @spec create_meeting(Enrollment.t(), map()) :: result(Meeting.t())
   def create_meeting(%Enrollment{} = enrollment, attrs) do
-    meeting =
-      struct!(
-        %Meeting{
-          id: Ids.generate(),
-          enrollment_id: enrollment.id,
-          day_of_week: nil,
-          starts_at: nil,
-          ends_at: nil
-        },
-        attrs
-      )
+    attrs = Map.put(attrs, :enrollment_id, enrollment.id)
 
-    with :ok <- validate_time_order(meeting) do
-      if Enum.any?(meetings_of(enrollment.id), &Meeting.overlaps?(&1, meeting)) do
-        {:error, {:conflict, "This time slot overlaps an existing meeting of the class"}}
-      else
-        {:ok, Store.put(:meetings, meeting)}
-      end
+    with {:ok, meeting} <- build(Meeting, attrs),
+         :ok <- ensure_no_overlap(enrollment, meeting) do
+      insert(meeting)
     end
   end
 
@@ -119,27 +125,23 @@ defmodule HeidyApi.Planner do
   def list_meetings(%Enrollment{id: enrollment_id}), do: meetings_of(enrollment_id)
 
   @spec fetch_meeting(User.t(), String.t()) :: result(Meeting.t())
-  def fetch_meeting(%User{}, id), do: Store.fetch(:meetings, id)
+  def fetch_meeting(%User{} = user, id), do: fetch_child(:meetings, user, id)
 
   @spec update_meeting(Meeting.t(), map()) :: result(Meeting.t())
   def update_meeting(%Meeting{} = meeting, attrs) do
-    updated = struct!(meeting, attrs)
-
-    with :ok <- validate_time_order(updated) do
-      {:ok, Store.put(:meetings, updated)}
-    end
+    meeting |> Meeting.changeset(attrs) |> Repo.update() |> normalize_changeset_error()
   end
 
   @spec delete_meeting(User.t(), String.t()) :: :ok
-  def delete_meeting(%User{}, id), do: Store.delete(:meetings, id)
+  def delete_meeting(%User{} = user, id), do: delete_child(:meetings, user, id)
 
   ## Tasks
 
   @spec create_task(User.t(), map()) :: result(Task.t())
   def create_task(%User{} = user, attrs) do
     with :ok <- ensure_enrollment(user, attrs[:enrollment_id]) do
-      {:ok,
-       Store.put(:tasks, struct!(%Task{id: Ids.generate(), user_id: user.id, title: nil}, attrs))}
+      attrs = Map.put(attrs, :user_id, user.id)
+      %Task{} |> Task.changeset(attrs) |> Repo.insert() |> normalize_changeset_error()
     end
   end
 
@@ -158,23 +160,28 @@ defmodule HeidyApi.Planner do
   @spec fetch_task(User.t(), String.t()) :: result(Task.t())
   def fetch_task(%User{} = user, id), do: fetch_owned(:tasks, user, id)
 
-  @spec update_task(Task.t(), map()) :: {:ok, Task.t()}
-  def update_task(%Task{} = task, attrs), do: {:ok, Store.put(:tasks, struct!(task, attrs))}
+  @spec update_task(Task.t(), map()) :: result(Task.t())
+  def update_task(%Task{} = task, attrs) do
+    task |> Task.changeset(attrs) |> Repo.update() |> normalize_changeset_error()
+  end
 
   @spec delete_task(User.t(), String.t()) :: :ok
-  def delete_task(%User{}, id), do: Store.delete(:tasks, id)
+  def delete_task(%User{} = user, id) do
+    Repo.delete_all(from(task in Task, where: task.user_id == ^user.id and task.id == ^id))
+    :ok
+  end
 
   ## Grades
 
   @spec create_grade(Enrollment.t(), map()) :: result(Grade.t())
   def create_grade(%Enrollment{} = enrollment, attrs) do
-    grade = struct!(%Grade{id: Ids.generate(), enrollment_id: enrollment.id, label: nil}, attrs)
-    {:ok, Store.put(:grades, grade)}
+    attrs = Map.put(attrs, :enrollment_id, enrollment.id)
+    %Grade{} |> Grade.changeset(attrs) |> Repo.insert() |> normalize_changeset_error()
   end
 
   @spec list_grades(Enrollment.t()) :: [Grade.t()]
   def list_grades(%Enrollment{id: enrollment_id}) do
-    Enum.filter(Store.list(:grades), &(&1.enrollment_id == enrollment_id))
+    Repo.all(from(grade in Grade, where: grade.enrollment_id == ^enrollment_id))
   end
 
   @spec grade_summary(Enrollment.t()) :: GradeSummary.t()
@@ -183,27 +190,27 @@ defmodule HeidyApi.Planner do
   end
 
   @spec fetch_grade(User.t(), String.t()) :: result(Grade.t())
-  def fetch_grade(%User{}, id), do: Store.fetch(:grades, id)
+  def fetch_grade(%User{} = user, id), do: fetch_child(:grades, user, id)
 
-  @spec update_grade(Grade.t(), map()) :: {:ok, Grade.t()}
-  def update_grade(%Grade{} = grade, attrs), do: {:ok, Store.put(:grades, struct!(grade, attrs))}
+  @spec update_grade(Grade.t(), map()) :: result(Grade.t())
+  def update_grade(%Grade{} = grade, attrs) do
+    grade |> Grade.changeset(attrs) |> Repo.update() |> normalize_changeset_error()
+  end
 
   @spec delete_grade(User.t(), String.t()) :: :ok
-  def delete_grade(%User{}, id), do: Store.delete(:grades, id)
+  def delete_grade(%User{} = user, id), do: delete_child(:grades, user, id)
 
   ## Absences
 
   @spec create_absence(Enrollment.t(), map()) :: result(Absence.t())
   def create_absence(%Enrollment{} = enrollment, attrs) do
-    absence =
-      struct!(%Absence{id: Ids.generate(), enrollment_id: enrollment.id, date: nil}, attrs)
-
-    {:ok, Store.put(:absences, absence)}
+    attrs = Map.put(attrs, :enrollment_id, enrollment.id)
+    %Absence{} |> Absence.changeset(attrs) |> Repo.insert() |> normalize_changeset_error()
   end
 
   @spec list_absences(Enrollment.t()) :: [Absence.t()]
   def list_absences(%Enrollment{id: enrollment_id}) do
-    Enum.filter(Store.list(:absences), &(&1.enrollment_id == enrollment_id))
+    Repo.all(from(absence in Absence, where: absence.enrollment_id == ^enrollment_id))
   end
 
   @spec attendance_summary(Enrollment.t()) :: AttendanceSummary.t()
@@ -212,7 +219,7 @@ defmodule HeidyApi.Planner do
   end
 
   @spec delete_absence(User.t(), String.t()) :: :ok
-  def delete_absence(%User{}, id), do: Store.delete(:absences, id)
+  def delete_absence(%User{} = user, id), do: delete_child(:absences, user, id)
 
   ## Schedule
 
@@ -226,24 +233,214 @@ defmodule HeidyApi.Planner do
 
   ## Shared helpers
 
-  defp owned(collection, %User{id: user_id}) do
-    Enum.filter(Store.list(collection), &(&1.user_id == user_id))
+  defp build(module, attrs) do
+    module.__struct__()
+    |> module.changeset(attrs)
+    |> Changeset.apply_action(:insert)
   end
 
-  # Ownership is enforced on stored rows: a foreign row answers :not_found
-  # (no existence leak). Demo fallback records belong to whoever asks.
-  defp fetch_owned(collection, %User{id: user_id}, id) do
-    case Store.get(collection, id) do
-      %{user_id: owner} when owner != user_id ->
+  defp insert(%module{} = struct) do
+    struct
+    |> module.changeset(Map.from_struct(struct))
+    |> Repo.insert()
+    |> normalize_changeset_error()
+  end
+
+  defp owned(:semesters, %User{id: user_id}) do
+    Repo.all(from(semester in Semester, where: semester.user_id == ^user_id))
+  end
+
+  defp owned(:enrollments, %User{id: user_id}) do
+    Repo.all(from(enrollment in Enrollment, where: enrollment.user_id == ^user_id))
+  end
+
+  defp owned(:tasks, %User{id: user_id}) do
+    Repo.all(from(task in Task, where: task.user_id == ^user_id))
+  end
+
+  defp fetch_owned(collection, %User{} = user, id) do
+    cond do
+      not Ids.valid?(id) ->
         {:error, :not_found}
 
-      %{} = record ->
+      Ids.reserved?(id) ->
+        {:error, :not_found}
+
+      record = get_owned(collection, user, id) ->
         {:ok, record}
 
-      nil ->
-        with {:ok, record} <- Store.fetch(collection, id) do
-          {:ok, %{record | user_id: user_id}}
-        end
+      true ->
+        fetch_demo_owned(collection, user, id)
+    end
+  end
+
+  defp get_owned(:semesters, user, id) do
+    Repo.one(
+      from(semester in Semester, where: semester.user_id == ^user.id and semester.id == ^id)
+    )
+  end
+
+  defp get_owned(:enrollments, user, id) do
+    Repo.one(
+      from(enrollment in Enrollment,
+        where: enrollment.user_id == ^user.id and enrollment.id == ^id
+      )
+    )
+  end
+
+  defp get_owned(:tasks, user, id) do
+    Repo.one(from(task in Task, where: task.user_id == ^user.id and task.id == ^id))
+  end
+
+  defp fetch_child(collection, %User{} = user, id) do
+    cond do
+      not Ids.valid?(id) -> {:error, :not_found}
+      Ids.reserved?(id) -> {:error, :not_found}
+      record = get_child(collection, user, id) -> {:ok, record}
+      true -> fetch_demo_child(collection, user, id)
+    end
+  end
+
+  defp get_child(:meetings, user, id) do
+    Repo.one(
+      from(meeting in Meeting,
+        join: enrollment in Enrollment,
+        on: enrollment.id == meeting.enrollment_id,
+        where: enrollment.user_id == ^user.id and meeting.id == ^id,
+        select: meeting
+      )
+    )
+  end
+
+  defp get_child(:grades, user, id) do
+    Repo.one(
+      from(grade in Grade,
+        join: enrollment in Enrollment,
+        on: enrollment.id == grade.enrollment_id,
+        where: enrollment.user_id == ^user.id and grade.id == ^id,
+        select: grade
+      )
+    )
+  end
+
+  defp get_child(:absences, user, id) do
+    Repo.one(
+      from(absence in Absence,
+        join: enrollment in Enrollment,
+        on: enrollment.id == absence.enrollment_id,
+        where: enrollment.user_id == ^user.id and absence.id == ^id,
+        select: absence
+      )
+    )
+  end
+
+  defp delete_child(collection, %User{} = user, id) do
+    case fetch_child(collection, user, id) do
+      {:ok, record} -> Repo.delete(record)
+      {:error, :not_found} -> :ok
+    end
+
+    :ok
+  end
+
+  defp fetch_demo_owned(collection, user, id) do
+    with {:ok, record} <- Demo.fetch(collection, id) do
+      persist_demo(collection, %{record | user_id: user.id}, user)
+    end
+  end
+
+  defp fetch_demo_child(collection, user, id) do
+    with {:ok, record} <- Demo.fetch(collection, id) do
+      persist_demo(collection, record, user)
+    end
+  end
+
+  defp persist_demo(:semesters, %Semester{} = semester, _user) do
+    %Semester{}
+    |> Semester.changeset(Map.from_struct(semester))
+    |> Repo.insert(on_conflict: :nothing)
+
+    {:ok, Repo.get!(Semester, semester.id)}
+  end
+
+  defp persist_demo(:enrollments, %Enrollment{} = enrollment, user) do
+    ensure_demo_semester(user, enrollment.semester_id)
+
+    attrs =
+      enrollment
+      |> Map.from_struct()
+      |> Map.put(:user_id, user.id)
+
+    %Enrollment{} |> Enrollment.changeset(attrs) |> Repo.insert(on_conflict: :nothing)
+    {:ok, Repo.get!(Enrollment, enrollment.id)}
+  end
+
+  defp persist_demo(:tasks, %Task{} = task, _user) do
+    %Task{} |> Task.changeset(Map.from_struct(task)) |> Repo.insert(on_conflict: :nothing)
+    {:ok, Repo.get!(Task, task.id)}
+  end
+
+  defp persist_demo(:meetings, %Meeting{} = meeting, user) do
+    ensure_demo_enrollment(user, meeting.enrollment_id)
+
+    %Meeting{}
+    |> Meeting.changeset(Map.from_struct(meeting))
+    |> Repo.insert(on_conflict: :nothing)
+
+    {:ok, Repo.get!(Meeting, meeting.id)}
+  end
+
+  defp persist_demo(:grades, %Grade{} = grade, user) do
+    ensure_demo_enrollment(user, grade.enrollment_id)
+    %Grade{} |> Grade.changeset(Map.from_struct(grade)) |> Repo.insert(on_conflict: :nothing)
+    {:ok, Repo.get!(Grade, grade.id)}
+  end
+
+  defp persist_demo(:absences, %Absence{} = absence, user) do
+    ensure_demo_enrollment(user, absence.enrollment_id)
+
+    %Absence{}
+    |> Absence.changeset(Map.from_struct(absence))
+    |> Repo.insert(on_conflict: :nothing)
+
+    {:ok, Repo.get!(Absence, absence.id)}
+  end
+
+  defp ensure_demo_semester(user, semester_id) do
+    unless Repo.get(Semester, semester_id) do
+      {:ok, semester} = Demo.fetch(:semesters, semester_id)
+      persist_demo(:semesters, %{semester | user_id: user.id}, user)
+    end
+  end
+
+  defp ensure_demo_enrollment(user, enrollment_id) do
+    unless Repo.get(Enrollment, enrollment_id) do
+      {:ok, enrollment} = Demo.fetch(:enrollments, enrollment_id)
+      persist_demo(:enrollments, %{enrollment | user_id: user.id}, user)
+    end
+  end
+
+  defp ensure_unique_period(user, semester) do
+    if Enum.any?(owned(:semesters, user), &same_period?(&1, semester)) do
+      {:error, {:conflict, "A semester with this label or overlapping dates already exists"}}
+    else
+      :ok
+    end
+  end
+
+  defp ensure_unique_class(user, enrollment) do
+    if Enum.any?(owned(:enrollments, user), &same_class?(&1, enrollment)) do
+      {:error, {:conflict, "This class is already in the semester"}}
+    else
+      :ok
+    end
+  end
+
+  defp ensure_no_overlap(enrollment, meeting) do
+    if Enum.any?(meetings_of(enrollment.id), &Meeting.overlaps?(&1, meeting)) do
+      {:error, {:conflict, "This time slot overlaps an existing meeting of the class"}}
+    else
+      :ok
     end
   end
 
@@ -276,20 +473,12 @@ defmodule HeidyApi.Planner do
     with {:ok, _enrollment} <- fetch_enrollment(user, enrollment_id), do: :ok
   end
 
-  defp validate_time_order(%Meeting{starts_at: %Time{} = starts, ends_at: %Time{} = ends}) do
-    if Time.compare(ends, starts) == :gt do
-      :ok
-    else
-      {:error, {:validation, %{"ends_at" => ["must be after starts_at"]}}}
-    end
-  end
-
   defp meetings_of(enrollment_id) do
-    Enum.filter(Store.list(:meetings), &(&1.enrollment_id == enrollment_id))
+    Repo.all(from(meeting in Meeting, where: meeting.enrollment_id == ^enrollment_id))
   end
 
   defp load_meetings(%Enrollment{} = enrollment) do
-    %{enrollment | meetings: meetings_of(enrollment.id)}
+    Repo.preload(enrollment, :meetings, force: true)
   end
 
   defp filter_by(items, _key, nil), do: items
@@ -299,9 +488,13 @@ defmodule HeidyApi.Planner do
 
   defp filter_tasks_by_semester(tasks, semester_id) do
     enrollment_ids =
-      Store.list(:enrollments)
-      |> Enum.filter(&(&1.semester_id == semester_id))
-      |> MapSet.new(& &1.id)
+      Repo.all(
+        from(enrollment in Enrollment,
+          where: enrollment.semester_id == ^semester_id,
+          select: enrollment.id
+        )
+      )
+      |> MapSet.new()
 
     Enum.filter(tasks, &(&1.enrollment_id in enrollment_ids))
   end
@@ -325,4 +518,12 @@ defmodule HeidyApi.Planner do
   defp sort(items, field, _default_key) do
     Enum.sort_by(items, &Map.get(&1, String.to_existing_atom(field)))
   end
+
+  defp normalize_changeset_error({:ok, record}), do: {:ok, record}
+
+  defp normalize_changeset_error({:error, %Ecto.Changeset{} = changeset}),
+    do: Changeset.validation_error(changeset)
+
+  defp preload_meetings({:ok, %Enrollment{} = enrollment}), do: {:ok, load_meetings(enrollment)}
+  defp preload_meetings(error), do: error
 end

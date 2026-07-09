@@ -51,6 +51,23 @@ defmodule HeidyApiWeb.AuthContractTest do
       assert is_binary(expires_at)
     end
 
+    test "a real login token authenticates a later request and logout revokes it" do
+      # Arrange
+      login_response = post(api_conn(), api_path("/auth/login"), Jason.encode!(login_input()))
+      %{"token" => token} = login_response |> json_response(200) |> assert_data_envelope()
+
+      # Act
+      me_response = get(auth_conn(token), api_path("/me"))
+      logout_response = delete(auth_conn(token), api_path("/auth/logout"))
+      revoked_response = get(auth_conn(token), api_path("/me"))
+
+      # Assert
+      user = me_response |> json_response(200) |> assert_data_envelope()
+      assert %{"usp_username" => "1234567"} = user
+      assert json_response(logout_response, 204) == nil
+      revoked_response |> json_response(401) |> assert_error_detail()
+    end
+
     test "logging in without an encrypted envelope reports a validation error" do
       # Arrange
       incomplete_credentials = %{"usp_username" => "abc"}

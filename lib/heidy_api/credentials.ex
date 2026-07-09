@@ -1,17 +1,17 @@
 defmodule HeidyApi.Credentials do
   @moduledoc """
   Issues, opens and revokes credential blobs. Stores *keys about* the
-  credential — never the credential: the USP password only ever exists in
+  credential - never the credential: the USP password only ever exists in
   worker memory, inside `HeidyApi.Credentials.Vault` calls.
 
-  Each user has one vault key (`K_user`). Rotating it — `revoke/1` — makes
+  Each user has one vault key (`K_user`). Rotating it - `revoke/1` - makes
   every blob ever issued to that user unopenable, which is the remote kill
   switch behind `DELETE /me/credential`.
   """
 
   alias HeidyApi.Accounts.User
-  alias HeidyApi.Credentials.{Blob, LoginKey, Vault}
-  alias HeidyApi.Store
+  alias HeidyApi.Credentials.{Blob, CredentialKey, LoginKey, Vault}
+  alias HeidyApi.Repo
 
   @doc "The public key clients seal login credentials to."
   @spec login_key() :: LoginKey.t()
@@ -39,15 +39,28 @@ defmodule HeidyApi.Credentials do
   @spec revoke(User.t()) :: :ok
   def revoke(%User{} = user) do
     {_key, version} = user_key(user)
-    Store.put(:credential_keys, user.id, {new_key(), version + 1})
+    upsert_key(user.id, new_key(), version + 1)
     :ok
   end
 
   defp user_key(user) do
-    case Store.get(:credential_keys, user.id) do
-      nil -> Store.put(:credential_keys, user.id, {new_key(), 1})
-      {key, version} -> {key, version}
+    case Repo.get(CredentialKey, user.id) do
+      nil ->
+        record = upsert_key(user.id, new_key(), 1)
+        {record.key, record.version}
+
+      %CredentialKey{key: key, version: version} ->
+        {key, version}
     end
+  end
+
+  defp upsert_key(user_id, key, version) do
+    %CredentialKey{}
+    |> CredentialKey.changeset(%{user_id: user_id, key: key, version: version})
+    |> Repo.insert!(
+      on_conflict: [set: [key: key, version: version, updated_at: DateTime.utc_now(:second)]],
+      conflict_target: :user_id
+    )
   end
 
   defp new_key, do: :crypto.strong_rand_bytes(32)

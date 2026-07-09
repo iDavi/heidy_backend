@@ -8,6 +8,7 @@ config :heidy_api, HeidyApiWeb.Endpoint,
   render_errors: [formats: [json: HeidyApiWeb.ErrorJSON], layout: false]
 
 config :heidy_api,
+  ecto_repos: [HeidyApi.Repo],
   usp_client: HeidyApi.Usp.Client.Jupiter,
   vault: HeidyApi.Credentials.Vault.Local,
   sync_async: true

@@ -1,12 +1,12 @@
 defmodule HeidyApi.Catalog do
   @moduledoc """
   Read-only university reference data (universities, units, courses,
-  disciplines). Served from the demo dataset until real seeding lands;
-  the API never writes to it.
+  disciplines). Served from the demo dataset until real seeding lands; the API
+  never writes to it.
   """
 
   alias HeidyApi.Catalog.{Discipline, Unit, University}
-  alias HeidyApi.{Demo, Page, Store}
+  alias HeidyApi.{Demo, Ids, Page}
 
   @type pagination :: %{
           :page => pos_integer(),
@@ -22,7 +22,7 @@ defmodule HeidyApi.Catalog do
   end
 
   @spec fetch_university(String.t()) :: {:ok, University.t()} | {:error, :not_found}
-  def fetch_university(id), do: Store.fetch(:universities, id)
+  def fetch_university(id), do: fetch_static(:universities, id)
 
   @spec list_units(University.t(), pagination()) :: Page.t()
   def list_units(%University{}, pagination) do
@@ -30,7 +30,7 @@ defmodule HeidyApi.Catalog do
   end
 
   @spec fetch_unit(String.t()) :: {:ok, Unit.t()} | {:error, :not_found}
-  def fetch_unit(id), do: Store.fetch(:units, id)
+  def fetch_unit(id), do: fetch_static(:units, id)
 
   @spec list_courses(Unit.t(), pagination()) :: Page.t()
   def list_courses(%Unit{}, pagination) do
@@ -45,7 +45,17 @@ defmodule HeidyApi.Catalog do
   end
 
   @spec fetch_discipline(String.t()) :: {:ok, Discipline.t()} | {:error, :not_found}
-  def fetch_discipline(id), do: Store.fetch(:disciplines, id)
+  def fetch_discipline(id), do: fetch_static(:disciplines, id)
+
+  defp fetch_static(_collection, id) when not is_binary(id), do: {:error, :not_found}
+
+  defp fetch_static(collection, id) do
+    cond do
+      not Ids.valid?(id) -> {:error, :not_found}
+      Ids.reserved?(id) -> {:error, :not_found}
+      true -> Demo.fetch(collection, id)
+    end
+  end
 
   defp filter_query(items, nil, _text), do: items
 

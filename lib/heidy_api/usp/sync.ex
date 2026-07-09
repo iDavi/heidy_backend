@@ -5,13 +5,17 @@ defmodule HeidyApi.Usp.Sync do
   `start/2` answers immediately with a `pending` run; the login + scrape +
   upsert happens in a supervised task so a slow USP never blocks a request.
   Syncs are serialized per user, and each run performs exactly one fresh
-  USP login whose session dies with the run — nothing USP-side is cached.
+  USP login whose session dies with the run - nothing USP-side is cached.
   """
 
+  import Ecto.Query
+
   alias HeidyApi.Accounts.User
+  alias HeidyApi.Changeset
   alias HeidyApi.Credentials
+  alias HeidyApi.Planner.{Enrollment, Meeting, Semester}
   alias HeidyApi.Usp.{Import, SyncRun}
-  alias HeidyApi.{Ids, Page, Store, Usp}
+  alias HeidyApi.{Demo, Ids, Page, Repo, Usp}
 
   @type start_error ::
           {:conflict, String.t()} | {:forbidden, String.t()} | :not_found
@@ -26,14 +30,16 @@ defmodule HeidyApi.Usp.Sync do
   def start(%User{} = user, attrs) do
     with :ok <- ensure_not_running(user),
          {:ok, password} <- open_blob(user, attrs.credential_blob) do
-      run =
-        Store.put(:sync_runs, %SyncRun{
-          id: Ids.generate(),
+      {:ok, run} =
+        %SyncRun{}
+        |> SyncRun.changeset(%{
           user_id: user.id,
           sources: attrs.sources,
           semester_id: attrs[:semester_id],
           started_at: DateTime.utc_now(:second)
         })
+        |> Repo.insert()
+        |> normalize_changeset_error()
 
       if Application.get_env(:heidy_api, :sync_async, true) do
         Task.Supervisor.start_child(__MODULE__.TaskSupervisor, fn ->
@@ -47,8 +53,7 @@ defmodule HeidyApi.Usp.Sync do
 
   @spec list(User.t(), map()) :: Page.t()
   def list(%User{} = user, filters) do
-    Store.list(:sync_runs)
-    |> Enum.filter(&(&1.user_id == user.id))
+    Repo.all(from(run in SyncRun, where: run.user_id == ^user.id))
     |> then(fn runs ->
       case filters[:status] do
         nil -> runs
@@ -61,14 +66,20 @@ defmodule HeidyApi.Usp.Sync do
 
   @spec fetch(User.t(), String.t()) :: {:ok, SyncRun.t()} | {:error, :not_found}
   def fetch(%User{} = user, id) do
-    case Store.fetch(:sync_runs, id) do
-      {:ok, %SyncRun{user_id: owner} = run} ->
-        if Store.get(:sync_runs, id) == nil or owner == user.id,
-          do: {:ok, %{run | user_id: user.id}},
-          else: {:error, :not_found}
-
-      {:error, :not_found} ->
+    cond do
+      not Ids.valid?(id) ->
         {:error, :not_found}
+
+      Ids.reserved?(id) ->
+        {:error, :not_found}
+
+      run = Repo.one(from(run in SyncRun, where: run.user_id == ^user.id and run.id == ^id)) ->
+        {:ok, run}
+
+      true ->
+        with {:ok, run} <- Demo.fetch(:sync_runs, id) do
+          {:ok, %{run | user_id: user.id}}
+        end
     end
   end
 
@@ -77,7 +88,7 @@ defmodule HeidyApi.Usp.Sync do
   # Runs off the request path; the password dies with this stack frame.
   @spec perform(SyncRun.t(), User.t(), binary()) :: SyncRun.t()
   def perform(%SyncRun{} = run, %User{} = user, password) do
-    run = Store.put(:sync_runs, %{run | status: "running"})
+    run = update_run!(run, %{status: "running"})
 
     case Usp.client().login(user.usp_username, password) do
       {:ok, session} ->
@@ -93,7 +104,11 @@ defmodule HeidyApi.Usp.Sync do
   end
 
   defp finish(run, attrs) do
-    Store.put(:sync_runs, struct!(run, Map.put(attrs, :finished_at, DateTime.utc_now(:second))))
+    update_run!(run, Map.put(attrs, :finished_at, DateTime.utc_now(:second)))
+  end
+
+  defp update_run!(run, attrs) do
+    run |> SyncRun.changeset(attrs) |> Repo.update!()
   end
 
   defp import_source("schedule", session, user) do
@@ -123,20 +138,15 @@ defmodule HeidyApi.Usp.Sync do
   defp upsert_semester(user, period) do
     attrs = Import.semester_attrs(period)
 
-    existing =
-      Enum.find(Store.list(:semesters), fn semester ->
-        semester.user_id == user.id and semester.external_ref == period
-      end)
-
-    case existing do
+    case Repo.one(
+           from(semester in Semester,
+             where: semester.user_id == ^user.id and semester.external_ref == ^period
+           )
+         ) do
       nil ->
-        Store.put(
-          :semesters,
-          struct!(
-            %HeidyApi.Planner.Semester{id: Ids.generate(), user_id: user.id, label: nil},
-            attrs
-          )
-        )
+        %Semester{}
+        |> Semester.changeset(Map.put(attrs, :user_id, user.id))
+        |> Repo.insert!()
 
       semester ->
         semester
@@ -146,29 +156,25 @@ defmodule HeidyApi.Usp.Sync do
   defp upsert_enrollment(user, semester, %{meetings: meetings} = attrs) do
     enrollment_attrs = Map.delete(attrs, :meetings)
 
-    existing =
-      Enum.find(Store.list(:enrollments), fn enrollment ->
-        enrollment.user_id == user.id and enrollment.external_ref == attrs.external_ref
-      end)
-
     enrollment =
-      case existing do
+      case Repo.one(
+             from(enrollment in Enrollment,
+               where:
+                 enrollment.user_id == ^user.id and enrollment.external_ref == ^attrs.external_ref
+             )
+           ) do
         nil ->
-          Store.put(
-            :enrollments,
-            struct!(
-              %HeidyApi.Planner.Enrollment{
-                id: Ids.generate(),
-                user_id: user.id,
-                semester_id: semester.id
-              },
-              enrollment_attrs
-            )
+          %Enrollment{}
+          |> Enrollment.changeset(
+            Map.merge(enrollment_attrs, %{user_id: user.id, semester_id: semester.id})
           )
+          |> Repo.insert!()
 
         # Manual edits win: only rows still owned by the sync are updated.
         %{source: "usp"} = enrollment ->
-          Store.put(:enrollments, struct!(enrollment, enrollment_attrs))
+          enrollment
+          |> Enrollment.changeset(enrollment_attrs)
+          |> Repo.update!()
 
         enrollment ->
           enrollment
@@ -180,32 +186,32 @@ defmodule HeidyApi.Usp.Sync do
 
   defp upsert_meeting(enrollment, attrs) do
     meeting =
-      struct!(
-        %HeidyApi.Planner.Meeting{
-          id: Ids.generate(),
-          enrollment_id: enrollment.id,
-          day_of_week: nil,
-          starts_at: nil,
-          ends_at: nil
-        },
-        attrs
-      )
+      %Meeting{}
+      |> Meeting.changeset(Map.put(attrs, :enrollment_id, enrollment.id))
+      |> Ecto.Changeset.apply_action!(:insert)
 
     duplicate? =
-      Enum.any?(Store.list(:meetings), fn existing ->
-        existing.enrollment_id == enrollment.id and
-          existing.day_of_week == meeting.day_of_week and
-          existing.starts_at == meeting.starts_at
-      end)
+      Repo.exists?(
+        from(existing in Meeting,
+          where:
+            existing.enrollment_id == ^enrollment.id and
+              existing.day_of_week == ^meeting.day_of_week and
+              existing.starts_at == ^meeting.starts_at
+        )
+      )
 
-    unless duplicate?, do: Store.put(:meetings, meeting)
+    unless duplicate? do
+      %Meeting{} |> Meeting.changeset(Map.from_struct(meeting)) |> Repo.insert!()
+    end
   end
 
   defp ensure_not_running(user) do
     active? =
-      Enum.any?(Store.list(:sync_runs), fn run ->
-        run.user_id == user.id and SyncRun.active?(run)
-      end)
+      Repo.exists?(
+        from(run in SyncRun,
+          where: run.user_id == ^user.id and run.status in ^~w(pending running)
+        )
+      )
 
     if active?,
       do: {:error, {:conflict, "A sync is already running for this account"}},
@@ -215,7 +221,7 @@ defmodule HeidyApi.Usp.Sync do
   defp open_blob(user, blob) do
     case Credentials.open_blob(user, blob) do
       {:ok, password} -> {:ok, password}
-      {:error, :expired} -> {:error, {:forbidden, "Credential blob is expired — log in again"}}
+      {:error, :expired} -> {:error, {:forbidden, "Credential blob is expired - log in again"}}
       {:error, :invalid} -> {:error, {:forbidden, "Credential blob is revoked or invalid"}}
     end
   end
@@ -224,4 +230,9 @@ defmodule HeidyApi.Usp.Sync do
     today = Date.utc_today()
     "#{today.year}#{if today.month <= 6, do: 1, else: 2}"
   end
+
+  defp normalize_changeset_error({:ok, record}), do: {:ok, record}
+
+  defp normalize_changeset_error({:error, %Ecto.Changeset{} = changeset}),
+    do: Changeset.validation_error(changeset)
 end
