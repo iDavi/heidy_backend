@@ -368,16 +368,26 @@ defmodule HeidyApi.Planner do
   end
 
   defp fetch_demo_owned(collection, user, id) do
-    with {:ok, record} <- Demo.fetch(collection, id) do
+    with true <- demo_user?(user),
+         {:ok, record} <- Demo.fetch(collection, id) do
       persist_demo(collection, %{record | user_id: user.id}, user)
+    else
+      false -> {:error, :not_found}
+      error -> error
     end
   end
 
   defp fetch_demo_child(collection, user, id) do
-    with {:ok, record} <- Demo.fetch(collection, id) do
+    with true <- demo_user?(user),
+         {:ok, record} <- Demo.fetch(collection, id) do
       persist_demo(collection, record, user)
+    else
+      false -> {:error, :not_found}
+      error -> error
     end
   end
+
+  defp demo_user?(%User{id: user_id}), do: user_id == Demo.user().id
 
   defp persist_demo(:semesters, %Semester{} = semester, _user) do
     %Semester{}
