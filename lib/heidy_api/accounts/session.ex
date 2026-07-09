@@ -4,28 +4,21 @@ defmodule HeidyApi.Accounts.Session do
   use HeidyApi.Schema
 
   import Ecto.Changeset
-
-  alias HeidyApi.Ids
+  import HeidyApi.Changeset, only: [put_new_id: 1]
 
   schema "sessions" do
     field(:user_id, :binary_id)
     field(:token_hash, :string)
+    field(:expires_at, :utc_datetime)
 
     timestamps(type: :utc_datetime)
   end
 
   def changeset(session, attrs) do
     session
-    |> cast(attrs, [:id, :user_id, :token_hash])
+    |> cast(attrs, [:id, :user_id, :token_hash, :expires_at])
     |> put_new_id()
-    |> validate_required([:id, :user_id, :token_hash])
+    |> validate_required([:id, :user_id, :token_hash, :expires_at])
     |> unique_constraint(:token_hash)
-  end
-
-  defp put_new_id(changeset) do
-    case get_field(changeset, :id) do
-      nil -> put_change(changeset, :id, Ids.generate())
-      _id -> changeset
-    end
   end
 end

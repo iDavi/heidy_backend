@@ -8,8 +8,7 @@ defmodule HeidyApi.Planner.Enrollment do
   use HeidyApi.Schema
 
   import Ecto.Changeset
-
-  alias HeidyApi.Ids
+  import HeidyApi.Changeset, only: [put_new_id: 1]
   alias HeidyApi.Planner.Meeting
 
   schema "enrollments" do
@@ -55,12 +54,5 @@ defmodule HeidyApi.Planner.Enrollment do
     |> validate_number(:absence_limit, greater_than_or_equal_to: 0)
     |> validate_format(:color, ~r/^#[0-9a-fA-F]{6}$/)
     |> validate_inclusion(:source, ~w(manual usp))
-  end
-
-  defp put_new_id(changeset) do
-    case get_field(changeset, :id) do
-      nil -> put_change(changeset, :id, Ids.generate())
-      _id -> changeset
-    end
   end
 end

@@ -17,6 +17,7 @@ defmodule HeidyApi.AccountsTest do
       stored_session = Repo.one!(Session)
       refute stored_session.token_hash == session.token
       assert String.length(stored_session.token_hash) == 64
+      assert DateTime.compare(stored_session.expires_at, DateTime.utc_now(:second)) == :gt
     end
 
     test "rejects invalid USP credentials without creating a user" do
@@ -32,6 +33,18 @@ defmodule HeidyApi.AccountsTest do
       assert :ok = Accounts.logout(session.token)
       assert {:error, :unauthorized} = Accounts.fetch_user_by_token(session.token)
       assert Repo.aggregate(Session, :count) == 0
+    end
+
+    test "expired sessions are rejected and deleted" do
+      {:ok, session} = Accounts.login("1234570", login_envelope())
+      stored_session = Repo.one!(Session)
+
+      stored_session
+      |> Session.changeset(%{expires_at: DateTime.add(DateTime.utc_now(:second), -1, :second)})
+      |> Repo.update!()
+
+      assert {:error, :unauthorized} = Accounts.fetch_user_by_token(session.token)
+      refute Repo.get(Session, stored_session.id)
     end
 
     test "demo token resolves to a persisted demo user" do

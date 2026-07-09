@@ -39,7 +39,7 @@ defmodule HeidyApi.Usp.Sync do
           started_at: DateTime.utc_now(:second)
         })
         |> Repo.insert()
-        |> normalize_changeset_error()
+        |> Changeset.normalize_result()
 
       if Application.get_env(:heidy_api, :sync_async, true) do
         Task.Supervisor.start_child(__MODULE__.TaskSupervisor, fn ->
@@ -230,9 +230,4 @@ defmodule HeidyApi.Usp.Sync do
     today = Date.utc_today()
     "#{today.year}#{if today.month <= 6, do: 1, else: 2}"
   end
-
-  defp normalize_changeset_error({:ok, record}), do: {:ok, record}
-
-  defp normalize_changeset_error({:error, %Ecto.Changeset{} = changeset}),
-    do: Changeset.validation_error(changeset)
 end

@@ -10,8 +10,7 @@ defmodule HeidyApi.Usp.SyncRun do
   use HeidyApi.Schema
 
   import Ecto.Changeset
-
-  alias HeidyApi.Ids
+  import HeidyApi.Changeset, only: [put_new_id: 1]
 
   schema "sync_runs" do
     field(:user_id, :binary_id)
@@ -56,12 +55,5 @@ defmodule HeidyApi.Usp.SyncRun do
     |> validate_required([:id, :user_id, :sources, :status])
     |> validate_subset(:sources, @sources)
     |> validate_inclusion(:status, @statuses)
-  end
-
-  defp put_new_id(changeset) do
-    case get_field(changeset, :id) do
-      nil -> put_change(changeset, :id, Ids.generate())
-      _id -> changeset
-    end
   end
 end

@@ -4,8 +4,7 @@ defmodule HeidyApi.Planner.Absence do
   use HeidyApi.Schema
 
   import Ecto.Changeset
-
-  alias HeidyApi.Ids
+  import HeidyApi.Changeset, only: [put_new_id: 1]
 
   schema "absences" do
     field(:enrollment_id, :binary_id)
@@ -29,12 +28,5 @@ defmodule HeidyApi.Planner.Absence do
     |> validate_number(:count, greater_than_or_equal_to: 1, less_than_or_equal_to: 10)
     |> validate_length(:note, max: 200)
     |> validate_inclusion(:source, ~w(manual usp))
-  end
-
-  defp put_new_id(changeset) do
-    case get_field(changeset, :id) do
-      nil -> put_change(changeset, :id, Ids.generate())
-      _id -> changeset
-    end
   end
 end

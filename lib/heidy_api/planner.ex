@@ -25,10 +25,11 @@ defmodule HeidyApi.Planner do
   @spec create_semester(User.t(), map()) :: result(Semester.t())
   def create_semester(%User{} = user, attrs) do
     attrs = Map.put(attrs, :user_id, user.id)
+    changeset = changeset_for(Semester, attrs)
 
-    with {:ok, semester} <- build(Semester, attrs),
+    with {:ok, semester} <- Changeset.apply_action(changeset, :insert),
          :ok <- ensure_unique_period(user, semester) do
-      insert(semester)
+      insert(changeset)
     end
   end
 
@@ -45,7 +46,7 @@ defmodule HeidyApi.Planner do
 
   @spec update_semester(Semester.t(), map()) :: result(Semester.t())
   def update_semester(%Semester{} = semester, attrs) do
-    semester |> Semester.changeset(attrs) |> Repo.update() |> normalize_changeset_error()
+    semester |> Semester.changeset(attrs) |> Repo.update() |> Changeset.normalize_result()
   end
 
   @spec delete_semester(User.t(), String.t()) :: :ok
@@ -64,10 +65,11 @@ defmodule HeidyApi.Planner do
     with {:ok, _semester} <- fetch_semester(user, attrs.semester_id),
          :ok <- ensure_discipline(attrs[:discipline_id]) do
       attrs = Map.put(attrs, :user_id, user.id)
+      changeset = changeset_for(Enrollment, attrs)
 
-      with {:ok, enrollment} <- build(Enrollment, attrs),
+      with {:ok, enrollment} <- Changeset.apply_action(changeset, :insert),
            :ok <- ensure_unique_class(user, enrollment),
-           {:ok, enrollment} <- insert(enrollment) do
+           {:ok, enrollment} <- insert(changeset) do
         {:ok, load_meetings(enrollment)}
       end
     end
@@ -94,7 +96,7 @@ defmodule HeidyApi.Planner do
     enrollment
     |> Enrollment.changeset(attrs)
     |> Repo.update()
-    |> normalize_changeset_error()
+    |> Changeset.normalize_result()
     |> preload_meetings()
   end
 
@@ -114,10 +116,11 @@ defmodule HeidyApi.Planner do
   @spec create_meeting(Enrollment.t(), map()) :: result(Meeting.t())
   def create_meeting(%Enrollment{} = enrollment, attrs) do
     attrs = Map.put(attrs, :enrollment_id, enrollment.id)
+    changeset = changeset_for(Meeting, attrs)
 
-    with {:ok, meeting} <- build(Meeting, attrs),
+    with {:ok, meeting} <- Changeset.apply_action(changeset, :insert),
          :ok <- ensure_no_overlap(enrollment, meeting) do
-      insert(meeting)
+      insert(changeset)
     end
   end
 
@@ -129,7 +132,7 @@ defmodule HeidyApi.Planner do
 
   @spec update_meeting(Meeting.t(), map()) :: result(Meeting.t())
   def update_meeting(%Meeting{} = meeting, attrs) do
-    meeting |> Meeting.changeset(attrs) |> Repo.update() |> normalize_changeset_error()
+    meeting |> Meeting.changeset(attrs) |> Repo.update() |> Changeset.normalize_result()
   end
 
   @spec delete_meeting(User.t(), String.t()) :: :ok
@@ -141,7 +144,7 @@ defmodule HeidyApi.Planner do
   def create_task(%User{} = user, attrs) do
     with :ok <- ensure_enrollment(user, attrs[:enrollment_id]) do
       attrs = Map.put(attrs, :user_id, user.id)
-      %Task{} |> Task.changeset(attrs) |> Repo.insert() |> normalize_changeset_error()
+      %Task{} |> Task.changeset(attrs) |> Repo.insert() |> Changeset.normalize_result()
     end
   end
 
@@ -162,7 +165,7 @@ defmodule HeidyApi.Planner do
 
   @spec update_task(Task.t(), map()) :: result(Task.t())
   def update_task(%Task{} = task, attrs) do
-    task |> Task.changeset(attrs) |> Repo.update() |> normalize_changeset_error()
+    task |> Task.changeset(attrs) |> Repo.update() |> Changeset.normalize_result()
   end
 
   @spec delete_task(User.t(), String.t()) :: :ok
@@ -176,7 +179,7 @@ defmodule HeidyApi.Planner do
   @spec create_grade(Enrollment.t(), map()) :: result(Grade.t())
   def create_grade(%Enrollment{} = enrollment, attrs) do
     attrs = Map.put(attrs, :enrollment_id, enrollment.id)
-    %Grade{} |> Grade.changeset(attrs) |> Repo.insert() |> normalize_changeset_error()
+    %Grade{} |> Grade.changeset(attrs) |> Repo.insert() |> Changeset.normalize_result()
   end
 
   @spec list_grades(Enrollment.t()) :: [Grade.t()]
@@ -194,7 +197,7 @@ defmodule HeidyApi.Planner do
 
   @spec update_grade(Grade.t(), map()) :: result(Grade.t())
   def update_grade(%Grade{} = grade, attrs) do
-    grade |> Grade.changeset(attrs) |> Repo.update() |> normalize_changeset_error()
+    grade |> Grade.changeset(attrs) |> Repo.update() |> Changeset.normalize_result()
   end
 
   @spec delete_grade(User.t(), String.t()) :: :ok
@@ -205,7 +208,7 @@ defmodule HeidyApi.Planner do
   @spec create_absence(Enrollment.t(), map()) :: result(Absence.t())
   def create_absence(%Enrollment{} = enrollment, attrs) do
     attrs = Map.put(attrs, :enrollment_id, enrollment.id)
-    %Absence{} |> Absence.changeset(attrs) |> Repo.insert() |> normalize_changeset_error()
+    %Absence{} |> Absence.changeset(attrs) |> Repo.insert() |> Changeset.normalize_result()
   end
 
   @spec list_absences(Enrollment.t()) :: [Absence.t()]
@@ -233,17 +236,15 @@ defmodule HeidyApi.Planner do
 
   ## Shared helpers
 
-  defp build(module, attrs) do
+  defp changeset_for(module, attrs) do
     module.__struct__()
     |> module.changeset(attrs)
-    |> Changeset.apply_action(:insert)
   end
 
-  defp insert(%module{} = struct) do
-    struct
-    |> module.changeset(Map.from_struct(struct))
+  defp insert(%Ecto.Changeset{} = changeset) do
+    changeset
     |> Repo.insert()
-    |> normalize_changeset_error()
+    |> Changeset.normalize_result()
   end
 
   defp owned(:semesters, %User{id: user_id}) do
@@ -336,11 +337,13 @@ defmodule HeidyApi.Planner do
 
   defp delete_child(collection, %User{} = user, id) do
     case fetch_child(collection, user, id) do
-      {:ok, record} -> Repo.delete(record)
-      {:error, :not_found} -> :ok
-    end
+      {:ok, record} ->
+        {:ok, _record} = Repo.delete(record)
+        :ok
 
-    :ok
+      {:error, :not_found} ->
+        :ok
+    end
   end
 
   defp fetch_demo_owned(collection, user, id) do
@@ -518,11 +521,6 @@ defmodule HeidyApi.Planner do
   defp sort(items, field, _default_key) do
     Enum.sort_by(items, &Map.get(&1, String.to_existing_atom(field)))
   end
-
-  defp normalize_changeset_error({:ok, record}), do: {:ok, record}
-
-  defp normalize_changeset_error({:error, %Ecto.Changeset{} = changeset}),
-    do: Changeset.validation_error(changeset)
 
   defp preload_meetings({:ok, %Enrollment{} = enrollment}), do: {:ok, load_meetings(enrollment)}
   defp preload_meetings(error), do: error

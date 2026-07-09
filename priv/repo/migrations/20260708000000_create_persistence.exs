@@ -18,12 +18,14 @@ defmodule HeidyApi.Repo.Migrations.CreatePersistence do
       add :id, :uuid, primary_key: true
       add :user_id, references(:users, type: :uuid, on_delete: :delete_all), null: false
       add :token_hash, :string, null: false
+      add :expires_at, :utc_datetime, null: false
 
       timestamps(type: :utc_datetime)
     end
 
     create unique_index(:sessions, [:token_hash])
     create index(:sessions, [:user_id])
+    create index(:sessions, [:expires_at])
 
     create table(:credential_keys, primary_key: false) do
       add :user_id, references(:users, type: :uuid, on_delete: :delete_all), primary_key: true

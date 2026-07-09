@@ -4,8 +4,7 @@ defmodule HeidyApi.Planner.Semester do
   use HeidyApi.Schema
 
   import Ecto.Changeset
-
-  alias HeidyApi.Ids
+  import HeidyApi.Changeset, only: [put_new_id: 1]
 
   schema "semesters" do
     field(:user_id, :binary_id)
@@ -50,13 +49,6 @@ defmodule HeidyApi.Planner.Semester do
       add_error(changeset, :end_date, "must be on or after start_date")
     else
       changeset
-    end
-  end
-
-  defp put_new_id(changeset) do
-    case get_field(changeset, :id) do
-      nil -> put_change(changeset, :id, Ids.generate())
-      _id -> changeset
     end
   end
 end

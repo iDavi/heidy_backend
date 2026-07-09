@@ -12,6 +12,8 @@ defmodule HeidyApi.Accounts do
   alias HeidyApi.Credentials.Blob
   alias HeidyApi.{Demo, Repo, Usp}
 
+  @session_ttl_days 30
+
   @type session :: %{user: User.t(), token: String.t(), credential_blob: Blob.t()}
 
   @doc """
@@ -40,7 +42,7 @@ defmodule HeidyApi.Accounts do
   @spec fetch_user_by_token(String.t()) :: {:ok, User.t()} | {:error, :unauthorized}
   def fetch_user_by_token(token) do
     case Repo.get_by(Session, token_hash: token_hash(token)) do
-      %Session{user_id: user_id} -> fetch_user(user_id)
+      %Session{} = session -> fetch_active_session(session)
       nil -> demo_session(token)
     end
   end
@@ -58,7 +60,7 @@ defmodule HeidyApi.Accounts do
     user
     |> User.profile_changeset(attrs)
     |> Repo.update()
-    |> normalize_changeset_error()
+    |> Changeset.normalize_result()
   end
 
   @doc "Deletes the account and revokes its credentials."
@@ -94,7 +96,11 @@ defmodule HeidyApi.Accounts do
     token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
 
     %Session{}
-    |> Session.changeset(%{user_id: user_id, token_hash: token_hash(token)})
+    |> Session.changeset(%{
+      user_id: user_id,
+      token_hash: token_hash(token),
+      expires_at: session_expires_at()
+    })
     |> Repo.insert!()
 
     token
@@ -117,6 +123,15 @@ defmodule HeidyApi.Accounts do
     end
   end
 
+  defp fetch_active_session(%Session{} = session) do
+    if DateTime.compare(DateTime.utc_now(:second), session.expires_at) == :gt do
+      Repo.delete(session)
+      {:error, :unauthorized}
+    else
+      fetch_user(session.user_id)
+    end
+  end
+
   defp ensure_user(%User{} = user) do
     case Repo.get(User, user.id) do
       nil ->
@@ -130,9 +145,17 @@ defmodule HeidyApi.Accounts do
   end
 
   defp token_hash(token) do
-    :sha256 |> :crypto.hash(token) |> Base.encode16(case: :lower)
+    :hmac
+    |> :crypto.mac(:sha256, session_token_secret(), token)
+    |> Base.encode16(case: :lower)
   end
 
-  defp normalize_changeset_error({:ok, record}), do: {:ok, record}
-  defp normalize_changeset_error({:error, changeset}), do: Changeset.validation_error(changeset)
+  defp session_expires_at do
+    ttl_days = Application.get_env(:heidy_api, :session_ttl_days, @session_ttl_days)
+    DateTime.utc_now(:second) |> DateTime.add(ttl_days, :day)
+  end
+
+  defp session_token_secret do
+    Application.fetch_env!(:heidy_api, :session_token_secret)
+  end
 end

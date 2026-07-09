@@ -4,8 +4,7 @@ defmodule HeidyApi.Planner.Grade do
   use HeidyApi.Schema
 
   import Ecto.Changeset
-
-  alias HeidyApi.Ids
+  import HeidyApi.Changeset, only: [put_new_id: 1]
 
   schema "grades" do
     field(:enrollment_id, :binary_id)
@@ -41,12 +40,5 @@ defmodule HeidyApi.Planner.Grade do
     |> validate_number(:max_score, greater_than: 0)
     |> validate_number(:weight, greater_than: 0)
     |> validate_inclusion(:source, ~w(manual usp))
-  end
-
-  defp put_new_id(changeset) do
-    case get_field(changeset, :id) do
-      nil -> put_change(changeset, :id, Ids.generate())
-      _id -> changeset
-    end
   end
 end

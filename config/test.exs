@@ -17,6 +17,7 @@ config :heidy_api, HeidyApiWeb.Endpoint,
 config :heidy_api,
   usp_client: HeidyApi.UspClientStub,
   vault: HeidyApi.VaultStub,
+  session_token_secret: "test-session-token-secret",
   demo_session_token: "test-token",
   sync_async: false
 

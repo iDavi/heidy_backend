@@ -7,8 +7,7 @@ defmodule HeidyApi.Accounts.User do
   use HeidyApi.Schema
 
   import Ecto.Changeset
-
-  alias HeidyApi.Ids
+  import HeidyApi.Changeset, only: [put_new_id: 1]
 
   schema "users" do
     field(:usp_username, :string)
@@ -39,12 +38,5 @@ defmodule HeidyApi.Accounts.User do
     |> cast(attrs, [:name, :email, :course_id])
     |> validate_length(:name, max: 120)
     |> validate_format(:email, ~r/^[^\s@]+@[^\s@]+\.[^\s@]+$/)
-  end
-
-  defp put_new_id(changeset) do
-    case get_field(changeset, :id) do
-      nil -> put_change(changeset, :id, Ids.generate())
-      _id -> changeset
-    end
   end
 end

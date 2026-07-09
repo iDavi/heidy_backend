@@ -8,8 +8,7 @@ defmodule HeidyApi.Planner.Task do
   use HeidyApi.Schema
 
   import Ecto.Changeset
-
-  alias HeidyApi.Ids
+  import HeidyApi.Changeset, only: [put_new_id: 1]
 
   schema "tasks" do
     field(:user_id, :binary_id)
@@ -59,12 +58,5 @@ defmodule HeidyApi.Planner.Task do
     |> validate_inclusion(:status, @statuses)
     |> validate_inclusion(:priority, @priorities)
     |> validate_inclusion(:source, ~w(manual usp))
-  end
-
-  defp put_new_id(changeset) do
-    case get_field(changeset, :id) do
-      nil -> put_change(changeset, :id, Ids.generate())
-      _id -> changeset
-    end
   end
 end

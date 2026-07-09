@@ -15,6 +15,7 @@ config :heidy_api, HeidyApiWeb.Endpoint,
   debug_errors: false,
   server: true
 
-# Convenience bearer token so the API can be exercised from curl
-# before real token issuance (database-backed sessions) lands.
+config :heidy_api, session_token_secret: "dev-session-token-secret"
+
+# Convenience bearer token so the API can be exercised from curl.
 config :heidy_api, demo_session_token: "dev-token"
