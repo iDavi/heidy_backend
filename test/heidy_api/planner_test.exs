@@ -59,7 +59,9 @@ defmodule HeidyApi.PlannerTest do
                  end_date: ~D[2026-07-15]
                })
 
-      assert [listed] = Planner.list_semesters(user, %{page: 1, page_size: 10})
+      assert %{items: [listed], total: 1} =
+               Planner.list_semesters(user, %{page: 1, page_size: 10})
+
       assert listed.id == semester.id
 
       assert {:ok, updated} = Planner.update_semester(semester, %{active: false})

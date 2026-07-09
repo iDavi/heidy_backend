@@ -270,6 +270,9 @@ defmodule HeidyApi.Planner do
       record = get_owned(collection, user, id) ->
         {:ok, record}
 
+      persisted?(collection, id) ->
+        {:error, :not_found}
+
       true ->
         fetch_demo_owned(collection, user, id)
     end
@@ -293,11 +296,20 @@ defmodule HeidyApi.Planner do
     Repo.one(from(task in Task, where: task.user_id == ^user.id and task.id == ^id))
   end
 
+  defp persisted?(:semesters, id),
+    do: Repo.exists?(from(semester in Semester, where: semester.id == ^id))
+
+  defp persisted?(:enrollments, id),
+    do: Repo.exists?(from(enrollment in Enrollment, where: enrollment.id == ^id))
+
+  defp persisted?(:tasks, id), do: Repo.exists?(from(task in Task, where: task.id == ^id))
+
   defp fetch_child(collection, %User{} = user, id) do
     cond do
       not Ids.valid?(id) -> {:error, :not_found}
       Ids.reserved?(id) -> {:error, :not_found}
       record = get_child(collection, user, id) -> {:ok, record}
+      child_persisted?(collection, id) -> {:error, :not_found}
       true -> fetch_demo_child(collection, user, id)
     end
   end
@@ -334,6 +346,15 @@ defmodule HeidyApi.Planner do
       )
     )
   end
+
+  defp child_persisted?(:meetings, id),
+    do: Repo.exists?(from(meeting in Meeting, where: meeting.id == ^id))
+
+  defp child_persisted?(:grades, id),
+    do: Repo.exists?(from(grade in Grade, where: grade.id == ^id))
+
+  defp child_persisted?(:absences, id),
+    do: Repo.exists?(from(absence in Absence, where: absence.id == ^id))
 
   defp delete_child(collection, %User{} = user, id) do
     case fetch_child(collection, user, id) do
