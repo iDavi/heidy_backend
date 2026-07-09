@@ -111,7 +111,8 @@ defmodule HeidyApiWeb.Serializer do
   def render(%LoginKey{} = key), do: Map.take(key, [:key_id, :alg, :public_key])
   def render(%Blob{} = blob), do: Map.take(blob, [:blob, :expires_at])
 
-  def render(%MoodleCourse{} = course), do: Map.take(course, [:id, :code, :name, :title, :url])
+  def render(%MoodleCourse{} = course),
+    do: Map.take(course, [:id, :code, :name, :title, :summary, :teachers, :url])
 
   def render(%Activity{} = activity), do: Map.take(activity, [:id, :title, :kind, :url])
 
