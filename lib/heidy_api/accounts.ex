@@ -4,10 +4,15 @@ defmodule HeidyApi.Accounts do
   the credential against USP live and creates the account on first success.
   """
 
-  alias HeidyApi.Accounts.User
+  import Ecto.Query
+
+  alias HeidyApi.Accounts.{Session, User}
+  alias HeidyApi.Changeset
   alias HeidyApi.Credentials
   alias HeidyApi.Credentials.Blob
-  alias HeidyApi.{Demo, Ids, Store, Usp}
+  alias HeidyApi.{Demo, Repo, Usp}
+
+  @session_ttl_days 30
 
   @type session :: %{user: User.t(), token: String.t(), credential_blob: Blob.t()}
 
@@ -36,27 +41,34 @@ defmodule HeidyApi.Accounts do
   @doc "Resolves a bearer token to its user."
   @spec fetch_user_by_token(String.t()) :: {:ok, User.t()} | {:error, :unauthorized}
   def fetch_user_by_token(token) do
-    case Store.get(:sessions, token) || demo_session(token) do
-      nil -> {:error, :unauthorized}
-      user_id -> {:ok, current_user(user_id)}
+    case Repo.get_by(Session, token_hash: token_hash(token)) do
+      %Session{} = session -> fetch_active_session(session)
+      nil -> demo_session(token)
     end
   end
 
   @doc "Revokes the given session token."
   @spec logout(String.t()) :: :ok
-  def logout(token), do: Store.delete(:sessions, token)
+  def logout(token) do
+    Repo.delete_all(from(session in Session, where: session.token_hash == ^token_hash(token)))
+    :ok
+  end
 
   @doc "Updates the user's own profile fields."
-  @spec update_profile(User.t(), map()) :: {:ok, User.t()}
+  @spec update_profile(User.t(), map()) :: {:ok, User.t()} | Changeset.validation_error()
   def update_profile(%User{} = user, attrs) do
-    {:ok, Store.put(:users, struct!(user, attrs))}
+    user
+    |> User.profile_changeset(attrs)
+    |> Repo.update()
+    |> Changeset.normalize_result()
   end
 
   @doc "Deletes the account and revokes its credentials."
   @spec delete_account(User.t()) :: :ok
   def delete_account(%User{} = user) do
     Credentials.revoke(user)
-    Store.delete(:users, user.id)
+    Repo.delete(user)
+    :ok
   end
 
   defp open_envelope(envelope) do
@@ -67,32 +79,83 @@ defmodule HeidyApi.Accounts do
   end
 
   defp upsert_user(usp_username, name) do
-    existing = Enum.find(Store.list(:users), &(&1.usp_username == usp_username))
+    case Repo.get_by(User, usp_username: usp_username) do
+      nil ->
+        %User{}
+        |> User.changeset(%{usp_username: usp_username, name: name})
+        |> Repo.insert!()
 
-    user =
-      case existing do
-        nil -> %User{id: Ids.generate(), usp_username: usp_username, name: name}
-        %User{} = user -> %{user | name: user.name || name}
-      end
-
-    Store.put(:users, user)
+      %User{} = user ->
+        user
+        |> User.changeset(%{name: user.name || name})
+        |> Repo.update!()
+    end
   end
 
   defp issue_token(%User{id: user_id}) do
     token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
-    Store.put(:sessions, token, user_id)
+
+    %Session{}
+    |> Session.changeset(%{
+      user_id: user_id,
+      token_hash: token_hash(token),
+      expires_at: session_expires_at()
+    })
+    |> Repo.insert!()
+
     token
   end
 
-  # Until database-backed sessions land, a configured fixed token (used by
-  # the contract suite and for local curl sessions) maps to the demo user.
+  # A configured fixed token maps to a persisted demo user for the contract
+  # suite and local curl sessions. Real sessions are stored as token hashes.
   defp demo_session(token) do
     if token != "" and token == Application.get_env(:heidy_api, :demo_session_token) do
-      Demo.user().id
+      {:ok, ensure_user(Demo.user())}
+    else
+      {:error, :unauthorized}
     end
   end
 
-  defp current_user(user_id) do
-    Store.get(:users, user_id) || %{Demo.user() | id: user_id}
+  defp fetch_user(user_id) do
+    case Repo.get(User, user_id) do
+      nil -> {:error, :unauthorized}
+      %User{} = user -> {:ok, user}
+    end
+  end
+
+  defp fetch_active_session(%Session{} = session) do
+    if DateTime.compare(DateTime.utc_now(:second), session.expires_at) == :gt do
+      Repo.delete(session)
+      {:error, :unauthorized}
+    else
+      fetch_user(session.user_id)
+    end
+  end
+
+  defp ensure_user(%User{} = user) do
+    case Repo.get(User, user.id) do
+      nil ->
+        %User{}
+        |> User.changeset(Map.take(user, [:id, :usp_username, :name, :email, :course_id]))
+        |> Repo.insert!()
+
+      %User{} = user ->
+        user
+    end
+  end
+
+  defp token_hash(token) do
+    :hmac
+    |> :crypto.mac(:sha256, session_token_secret(), token)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp session_expires_at do
+    ttl_days = Application.get_env(:heidy_api, :session_ttl_days, @session_ttl_days)
+    DateTime.utc_now(:second) |> DateTime.add(ttl_days, :day)
+  end
+
+  defp session_token_secret do
+    Application.fetch_env!(:heidy_api, :session_token_secret)
   end
 end

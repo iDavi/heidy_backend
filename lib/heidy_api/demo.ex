@@ -1,12 +1,11 @@
 defmodule HeidyApi.Demo do
   @moduledoc """
-  The deterministic dataset `HeidyApi.Store` serves while real persistence
-  does not exist yet.
+  The deterministic dataset the contract suite uses as a read fallback.
 
   Any well-formed, non-reserved id resolves to the collection's demo record
   (carrying the requested id), so every read/update/delete flow of the API
   can be exercised end-to-end. The catalog is a small static USP sample.
-  Remove this module when the database-backed repo lands.
+  Remove this module when the catalog and contract fixtures move to seeds.
   """
 
   alias HeidyApi.Accounts.User
@@ -24,8 +23,7 @@ defmodule HeidyApi.Demo do
   end
 
   @doc "Resolves a demo record for `collection` under the requested `id`."
-  @spec fetch(HeidyApi.Store.collection(), String.t()) ::
-          {:ok, struct()} | {:error, :not_found}
+  @spec fetch(atom(), String.t()) :: {:ok, struct()} | {:error, :not_found}
   def fetch(collection, id) do
     case build(collection, id) do
       nil -> {:error, :not_found}

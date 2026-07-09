@@ -5,32 +5,26 @@ defmodule HeidyApi.Planner.Task do
   @statuses ~w(todo doing done)
   @priorities ~w(low normal high)
 
-  @enforce_keys [:id, :user_id, :title]
-  defstruct [
-    :id,
-    :user_id,
-    :enrollment_id,
-    :title,
-    :notes,
-    :due_at,
-    kind: "assignment",
-    status: "todo",
-    priority: "normal",
-    source: "manual"
-  ]
+  use HeidyApi.Schema
 
-  @type t :: %__MODULE__{
-          id: String.t(),
-          user_id: String.t(),
-          enrollment_id: String.t() | nil,
-          title: String.t(),
-          notes: String.t() | nil,
-          due_at: DateTime.t() | nil,
-          kind: String.t(),
-          status: String.t(),
-          priority: String.t(),
-          source: String.t()
-        }
+  import Ecto.Changeset
+  import HeidyApi.Changeset, only: [put_new_id: 1]
+
+  schema "tasks" do
+    field(:user_id, :binary_id)
+    field(:enrollment_id, :binary_id)
+    field(:title, :string)
+    field(:notes, :string)
+    field(:due_at, :utc_datetime)
+    field(:kind, :string, default: "assignment")
+    field(:status, :string, default: "todo")
+    field(:priority, :string, default: "normal")
+    field(:source, :string, default: "manual")
+
+    timestamps(type: :utc_datetime)
+  end
+
+  @type t :: %__MODULE__{}
 
   @spec kinds() :: [String.t()]
   def kinds, do: @kinds
@@ -40,4 +34,42 @@ defmodule HeidyApi.Planner.Task do
 
   @spec priorities() :: [String.t()]
   def priorities, do: @priorities
+
+  @spec changeset(t(), map()) :: Ecto.Changeset.t()
+  def changeset(task, attrs) do
+    task
+    |> cast(attrs, [
+      :id,
+      :user_id,
+      :enrollment_id,
+      :title,
+      :notes,
+      :due_at,
+      :kind,
+      :status,
+      :priority,
+      :source
+    ])
+    |> put_new_id()
+    |> validate_required([:id, :user_id, :title])
+    |> validate_fields()
+  end
+
+  @spec update_changeset(t(), map()) :: Ecto.Changeset.t()
+  def update_changeset(task, attrs) do
+    task
+    |> cast(attrs, [:enrollment_id, :title, :notes, :due_at, :kind, :status, :priority])
+    |> validate_required([:title])
+    |> validate_fields()
+  end
+
+  defp validate_fields(changeset) do
+    changeset
+    |> validate_length(:title, max: 160)
+    |> validate_length(:notes, max: 2_000)
+    |> validate_inclusion(:kind, @kinds)
+    |> validate_inclusion(:status, @statuses)
+    |> validate_inclusion(:priority, @priorities)
+    |> validate_inclusion(:source, ~w(manual usp))
+  end
 end

@@ -22,6 +22,16 @@ defmodule HeidyApi.ApiContractCase do
     end
   end
 
+  setup tags do
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(HeidyApi.Repo)
+
+    unless tags[:async] do
+      Ecto.Adapters.SQL.Sandbox.mode(HeidyApi.Repo, {:shared, self()})
+    end
+
+    :ok
+  end
+
   @doc "Builds the full path for a versioned API route (e.g. `/api/v1/health`)."
   def api_path(path), do: "/api/v1" <> path
 
@@ -34,8 +44,13 @@ defmodule HeidyApi.ApiContractCase do
 
   @doc "A JSON request carrying a valid bearer token."
   def auth_conn do
+    auth_conn("test-token")
+  end
+
+  @doc "A JSON request carrying a specific bearer token."
+  def auth_conn(token) do
     api_conn()
-    |> Plug.Conn.put_req_header("authorization", "Bearer test-token")
+    |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
   end
 
   @doc "Asserts the response status and decodes the JSON body (or `nil` when empty)."
