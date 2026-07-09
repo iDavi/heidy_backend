@@ -2,6 +2,8 @@ defmodule HeidyApi.Repo.Migrations.CreatePersistence do
   use Ecto.Migration
 
   def change do
+    execute "CREATE EXTENSION IF NOT EXISTS btree_gist", "DROP EXTENSION IF EXISTS btree_gist"
+
     create table(:users, primary_key: false) do
       add :id, :uuid, primary_key: true
       add :usp_username, :string, null: false
@@ -49,7 +51,21 @@ defmodule HeidyApi.Repo.Migrations.CreatePersistence do
     end
 
     create index(:semesters, [:user_id])
+    create unique_index(:semesters, [:user_id, :label])
     create unique_index(:semesters, [:user_id, :external_ref], where: "external_ref IS NOT NULL")
+
+    execute(
+      """
+      ALTER TABLE semesters
+      ADD CONSTRAINT semesters_no_overlapping_dates
+      EXCLUDE USING gist (
+        user_id WITH =,
+        daterange(start_date, end_date, '[]') WITH &&
+      )
+      WHERE (start_date IS NOT NULL AND end_date IS NOT NULL)
+      """,
+      "ALTER TABLE semesters DROP CONSTRAINT semesters_no_overlapping_dates"
+    )
 
     create table(:enrollments, primary_key: false) do
       add :id, :uuid, primary_key: true
@@ -71,6 +87,14 @@ defmodule HeidyApi.Repo.Migrations.CreatePersistence do
     create index(:enrollments, [:semester_id])
     create unique_index(:enrollments, [:user_id, :external_ref], where: "external_ref IS NOT NULL")
 
+    create unique_index(:enrollments, [:user_id, :semester_id, :discipline_id],
+             where: "discipline_id IS NOT NULL"
+           )
+
+    create unique_index(:enrollments, [:user_id, :semester_id, :title],
+             where: "title IS NOT NULL"
+           )
+
     create table(:meetings, primary_key: false) do
       add :id, :uuid, primary_key: true
       add :enrollment_id, references(:enrollments, type: :uuid, on_delete: :delete_all), null: false
@@ -83,6 +107,23 @@ defmodule HeidyApi.Repo.Migrations.CreatePersistence do
     end
 
     create index(:meetings, [:enrollment_id])
+
+    execute(
+      """
+      ALTER TABLE meetings
+      ADD CONSTRAINT meetings_no_overlapping_times
+      EXCLUDE USING gist (
+        enrollment_id WITH =,
+        day_of_week WITH =,
+        int4range(
+          EXTRACT(EPOCH FROM starts_at)::integer,
+          EXTRACT(EPOCH FROM ends_at)::integer,
+          '[)'
+        ) WITH &&
+      )
+      """,
+      "ALTER TABLE meetings DROP CONSTRAINT meetings_no_overlapping_times"
+    )
 
     create table(:tasks, primary_key: false) do
       add :id, :uuid, primary_key: true

@@ -35,6 +35,23 @@ defmodule HeidyApi.Planner.Semester do
     ])
     |> put_new_id()
     |> validate_required([:id, :user_id, :label])
+    |> validate_fields()
+    |> unique_constraint(:label, name: :semesters_user_id_label_index)
+    |> exclusion_constraint(:start_date, name: :semesters_no_overlapping_dates)
+  end
+
+  @spec update_changeset(t(), map()) :: Ecto.Changeset.t()
+  def update_changeset(semester, attrs) do
+    semester
+    |> cast(attrs, [:label, :start_date, :end_date, :active])
+    |> validate_required([:label])
+    |> validate_fields()
+    |> unique_constraint(:label, name: :semesters_user_id_label_index)
+    |> exclusion_constraint(:start_date, name: :semesters_no_overlapping_dates)
+  end
+
+  defp validate_fields(changeset) do
+    changeset
     |> validate_length(:label, max: 20)
     |> validate_inclusion(:source, ~w(manual usp))
     |> validate_date_order()

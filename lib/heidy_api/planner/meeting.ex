@@ -24,6 +24,21 @@ defmodule HeidyApi.Planner.Meeting do
     |> cast(attrs, [:id, :enrollment_id, :day_of_week, :starts_at, :ends_at, :location])
     |> put_new_id()
     |> validate_required([:id, :enrollment_id, :day_of_week, :starts_at, :ends_at])
+    |> validate_fields()
+    |> exclusion_constraint(:starts_at, name: :meetings_no_overlapping_times)
+  end
+
+  @spec update_changeset(t(), map()) :: Ecto.Changeset.t()
+  def update_changeset(meeting, attrs) do
+    meeting
+    |> cast(attrs, [:day_of_week, :starts_at, :ends_at, :location])
+    |> validate_required([:day_of_week, :starts_at, :ends_at])
+    |> validate_fields()
+    |> exclusion_constraint(:starts_at, name: :meetings_no_overlapping_times)
+  end
+
+  defp validate_fields(changeset) do
+    changeset
     |> validate_number(:day_of_week, greater_than_or_equal_to: 1, less_than_or_equal_to: 7)
     |> validate_length(:location, max: 120)
     |> validate_time_order()

@@ -46,7 +46,7 @@ defmodule HeidyApi.Planner do
 
   @spec update_semester(Semester.t(), map()) :: result(Semester.t())
   def update_semester(%Semester{} = semester, attrs) do
-    semester |> Semester.changeset(attrs) |> Repo.update() |> Changeset.normalize_result()
+    semester |> Semester.update_changeset(attrs) |> Repo.update() |> normalize_planner_result()
   end
 
   @spec delete_semester(User.t(), String.t()) :: :ok
@@ -94,9 +94,9 @@ defmodule HeidyApi.Planner do
   @spec update_enrollment(Enrollment.t(), map()) :: result(Enrollment.t())
   def update_enrollment(%Enrollment{} = enrollment, attrs) do
     enrollment
-    |> Enrollment.changeset(attrs)
+    |> Enrollment.update_changeset(attrs)
     |> Repo.update()
-    |> Changeset.normalize_result()
+    |> normalize_planner_result()
     |> preload_meetings()
   end
 
@@ -132,7 +132,7 @@ defmodule HeidyApi.Planner do
 
   @spec update_meeting(Meeting.t(), map()) :: result(Meeting.t())
   def update_meeting(%Meeting{} = meeting, attrs) do
-    meeting |> Meeting.changeset(attrs) |> Repo.update() |> Changeset.normalize_result()
+    meeting |> Meeting.update_changeset(attrs) |> Repo.update() |> normalize_planner_result()
   end
 
   @spec delete_meeting(User.t(), String.t()) :: :ok
@@ -165,7 +165,9 @@ defmodule HeidyApi.Planner do
 
   @spec update_task(Task.t(), map()) :: result(Task.t())
   def update_task(%Task{} = task, attrs) do
-    task |> Task.changeset(attrs) |> Repo.update() |> Changeset.normalize_result()
+    with :ok <- ensure_enrollment(%User{id: task.user_id}, attrs[:enrollment_id]) do
+      task |> Task.update_changeset(attrs) |> Repo.update() |> Changeset.normalize_result()
+    end
   end
 
   @spec delete_task(User.t(), String.t()) :: :ok
@@ -197,7 +199,7 @@ defmodule HeidyApi.Planner do
 
   @spec update_grade(Grade.t(), map()) :: result(Grade.t())
   def update_grade(%Grade{} = grade, attrs) do
-    grade |> Grade.changeset(attrs) |> Repo.update() |> Changeset.normalize_result()
+    grade |> Grade.update_changeset(attrs) |> Repo.update() |> Changeset.normalize_result()
   end
 
   @spec delete_grade(User.t(), String.t()) :: :ok
@@ -244,7 +246,36 @@ defmodule HeidyApi.Planner do
   defp insert(%Ecto.Changeset{} = changeset) do
     changeset
     |> Repo.insert()
-    |> Changeset.normalize_result()
+    |> normalize_planner_result()
+  end
+
+  defp normalize_planner_result({:ok, record}), do: {:ok, record}
+
+  defp normalize_planner_result({:error, %Ecto.Changeset{} = changeset}) do
+    constraint_conflict(changeset) || Changeset.validation_error(changeset)
+  end
+
+  defp constraint_conflict(%Ecto.Changeset{} = changeset) do
+    constraint_names =
+      changeset.errors
+      |> Enum.map(fn {_field, {_message, opts}} -> opts[:constraint_name] end)
+      |> Enum.reject(&is_nil/1)
+
+    cond do
+      "semesters_user_id_label_index" in constraint_names or
+          "semesters_no_overlapping_dates" in constraint_names ->
+        {:error, {:conflict, "A semester with this label or overlapping dates already exists"}}
+
+      "enrollments_user_id_semester_id_discipline_id_index" in constraint_names or
+          "enrollments_user_id_semester_id_title_index" in constraint_names ->
+        {:error, {:conflict, "This class is already in the semester"}}
+
+      "meetings_no_overlapping_times" in constraint_names ->
+        {:error, {:conflict, "This time slot overlaps an existing meeting of the class"}}
+
+      true ->
+        nil
+    end
   end
 
   defp owned(:semesters, %User{id: user_id}) do

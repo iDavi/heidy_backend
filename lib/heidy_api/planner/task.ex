@@ -52,6 +52,19 @@ defmodule HeidyApi.Planner.Task do
     ])
     |> put_new_id()
     |> validate_required([:id, :user_id, :title])
+    |> validate_fields()
+  end
+
+  @spec update_changeset(t(), map()) :: Ecto.Changeset.t()
+  def update_changeset(task, attrs) do
+    task
+    |> cast(attrs, [:enrollment_id, :title, :notes, :due_at, :kind, :status, :priority])
+    |> validate_required([:title])
+    |> validate_fields()
+  end
+
+  defp validate_fields(changeset) do
+    changeset
     |> validate_length(:title, max: 160)
     |> validate_length(:notes, max: 2_000)
     |> validate_inclusion(:kind, @kinds)

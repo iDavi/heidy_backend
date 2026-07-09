@@ -35,6 +35,19 @@ defmodule HeidyApi.Planner.Grade do
     ])
     |> put_new_id()
     |> validate_required([:id, :enrollment_id, :label])
+    |> validate_fields()
+  end
+
+  @spec update_changeset(t(), map()) :: Ecto.Changeset.t()
+  def update_changeset(grade, attrs) do
+    grade
+    |> cast(attrs, [:label, :score, :max_score, :weight])
+    |> validate_required([:label])
+    |> validate_fields()
+  end
+
+  defp validate_fields(changeset) do
+    changeset
     |> validate_length(:label, max: 80)
     |> validate_number(:score, greater_than_or_equal_to: 0)
     |> validate_number(:max_score, greater_than: 0)
