@@ -1,4 +1,12 @@
 #!/bin/sh
 set -eu
 
+export RELEASE_COMMAND=1
+
+if [ -z "${DATABASE_URL:-}${DIRECT_DATABASE_URL:-}" ]; then
+  echo "DATABASE_URL or DIRECT_DATABASE_URL is required for migrations" >&2
+  exit 1
+fi
+
+echo "Running database migrations" >&2
 exec /app/bin/heidy_api eval "HeidyApi.Release.migrate()"
