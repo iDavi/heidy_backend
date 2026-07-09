@@ -6,6 +6,12 @@ if config_env() == :prod do
   host = System.get_env("PHX_HOST") || "#{fly_app_name}.fly.dev"
   port = String.to_integer(System.get_env("PORT") || "4000")
 
+  cors_allowed_origins =
+    "CORS_ALLOWED_ORIGINS"
+    |> System.get_env("*")
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+
   database_url =
     if release_command? do
       System.get_env("DIRECT_DATABASE_URL") || System.get_env("DATABASE_URL")
@@ -35,6 +41,7 @@ if config_env() == :prod do
     end
 
   config :heidy_api, HeidyApi.Repo, repo_config
+  config :heidy_api, cors_allowed_origins: cors_allowed_origins
 
   unless release_command? do
     secret_key_base =
