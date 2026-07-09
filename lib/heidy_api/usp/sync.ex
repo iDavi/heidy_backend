@@ -105,8 +105,12 @@ defmodule HeidyApi.Usp.Sync do
     rescue
       # A run must never be left stuck at "running" - an unexpected error
       # (a lost race with a concurrent sync, a USP data quirk, etc.) still
-      # has to resolve to a terminal status.
-      error -> finish(run, %{status: "failed", error: "Sync failed: #{Exception.message(error)}"})
+      # has to resolve to a terminal status. Some exceptions (Ecto's in
+      # particular) carry very long messages, so this has to fit the
+      # error column rather than raise a second time while finishing.
+      error ->
+        message = "Sync failed: #{Exception.message(error)}" |> String.slice(0, 255)
+        finish(run, %{status: "failed", error: message})
     end
   end
 
