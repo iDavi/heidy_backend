@@ -70,5 +70,48 @@ defmodule HeidyApi.Usp.SyncTest do
       assert Repo.get!(Enrollment, manual.id).title == "Manual title"
       assert Repo.aggregate(Enrollment, :count) == 1
     end
+
+    test "a manual enrollment already holding the class's title does not crash the sync" do
+      user = user_fixture(%{usp_username: "7654325"})
+
+      semester =
+        semester_fixture(user, %{
+          label: "2026.1",
+          start_date: ~D[2026-02-01],
+          end_date: ~D[2026-07-15]
+        })
+
+      manual =
+        enrollment_fixture(user, %{
+          semester: semester,
+          title: "ACH2016",
+          source: "manual",
+          external_ref: "manual-ref"
+        })
+
+      {:ok, run} = Sync.start(user, %{credential_blob: "stub-blob", sources: ["schedule"]})
+
+      assert %SyncRun{status: "succeeded", counts: %{"schedule" => 1}} =
+               Sync.perform(run, user, "stub-password")
+
+      assert Repo.aggregate(Enrollment, :count) == 1
+      assert %Enrollment{source: "manual"} = Repo.get!(Enrollment, manual.id)
+    end
+
+    test "perform marks the run failed instead of crashing on an unexpected error" do
+      user = user_fixture(%{usp_username: "7654326"})
+      {:ok, run} = Sync.start(user, %{credential_blob: "stub-blob", sources: ["schedule"]})
+
+      # Deleting the user out from under an in-flight run cascades the
+      # sync_run row away too, so the worker's own status update hits a
+      # stale record - the kind of unexpected failure perform/3 must
+      # still resolve to a terminal status rather than crash on.
+      Repo.delete!(user)
+
+      assert %SyncRun{status: "failed", error: error} =
+               Sync.perform(run, user, "stub-password")
+
+      assert error =~ "Sync failed"
+    end
   end
 end
