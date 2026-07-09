@@ -1,33 +1,38 @@
-app = "heidy-backend"
-primary_region = "gru"
+# fly.toml app configuration file generated for heidy-backend on 2026-07-09T05:00:13Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'heidy-backend'
+primary_region = 'gru'
 
 [build]
-  dockerfile = "Dockerfile"
-
-[env]
-  PHX_HOST = "heidy-backend.fly.dev"
-  PORT = "4000"
-  POOL_SIZE = "8"
+  dockerfile = 'Dockerfile'
 
 [deploy]
-  release_command = "/app/bin/migrate"
-  release_command_timeout = "10m"
+  release_command = '/app/bin/migrate'
+  release_command_timeout = '10m0s'
+
+[env]
+  PHX_HOST = 'heidy-backend.fly.dev'
+  POOL_SIZE = '8'
+  PORT = '4000'
 
 [http_service]
   internal_port = 4000
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
-  processes = ["app"]
+  processes = ['app']
 
   [[http_service.checks]]
-    interval = "15s"
-    timeout = "2s"
-    grace_period = "20s"
-    method = "GET"
-    path = "/api/v1/health"
+    interval = '15s'
+    timeout = '2s'
+    grace_period = '20s'
+    method = 'GET'
+    path = '/api/v1/health'
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'
