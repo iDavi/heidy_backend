@@ -17,6 +17,22 @@ defmodule HeidyApiWeb.SyncContractTest do
       assert is_binary(run["id"])
     end
 
+    test "a started sync run is visible to later fetch and list requests" do
+      # Arrange
+      response = post(auth_conn(), api_path("/usp/sync"), Jason.encode!(sync_input()))
+      %{"id" => run_id} = response |> json_response(202) |> assert_data_envelope()
+
+      # Act
+      fetch_response = get(auth_conn(), api_path("/usp/sync/#{run_id}"))
+      list_response = get(auth_conn(), api_path("/usp/sync"))
+
+      # Assert
+      fetched = fetch_response |> json_response(200) |> assert_data_envelope()
+      listed = list_response |> json_response(200) |> assert_list_envelope()
+      assert fetched["id"] == run_id
+      assert Enum.any?(listed, &(&1["id"] == run_id))
+    end
+
     test "starting a sync without a credential blob reports a validation error" do
       # Arrange
       request = Map.delete(sync_input(), "credential_blob")
