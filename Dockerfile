@@ -32,7 +32,13 @@ RUN mix release
 
 FROM ${RUNNER_IMAGE}
 
-RUN apt-get update -y && apt-get install -y --no-install-recommends libstdc++6 openssl libncurses6 ca-certificates \
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+    libstdc++6 \
+    openssl \
+    libncurses6 \
+    ca-certificates \
+    postgresql-15 \
+    postgresql-client-15 \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

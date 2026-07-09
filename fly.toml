@@ -9,14 +9,17 @@ primary_region = 'gru'
 [build]
   dockerfile = 'Dockerfile'
 
-[deploy]
-  release_command = '/app/bin/migrate'
-  release_command_timeout = '10m0s'
-
 [env]
+  DATABASE_URL = 'postgres://postgres@127.0.0.1:5432/heidy_api'
+  ECTO_IPV6 = 'false'
+  EMBEDDED_POSTGRES = 'true'
   PHX_HOST = 'heidy-backend.fly.dev'
   POOL_SIZE = '8'
   PORT = '4000'
+
+[[mounts]]
+  source = 'heidy_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 4000
